@@ -184,14 +184,41 @@ func peekUpdateStatus() *updateStatus {
 	return cachedUpdate
 }
 
+// autoUpdateEnabled reports whether TURBOWEB_AUTO_UPDATE opts the daemon
+// into installing new releases automatically, rather than only detecting
+// them. Accepts the usual truthy spellings.
+func autoUpdateEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TURBOWEB_AUTO_UPDATE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // startUpdateChecker runs a release check shortly after daemon startup,
 // then refreshes it every updateCheckTTL, so connection_status can report
-// "update available" without ever blocking on a GitHub request.
+// "update available" without ever blocking on a GitHub request. When
+// TURBOWEB_AUTO_UPDATE is set, a detected update is installed immediately
+// — the on-disk binary is replaced and the daemon's existing stale-binary
+// detection respawns it from the new build on the next MCP call.
 func startUpdateChecker() {
 	go func() {
 		time.Sleep(5 * time.Second) // let startup settle before the first call
 		for {
-			getUpdateStatus(true)
+			st := getUpdateStatus(true)
+			if st.UpdateAvailable && autoUpdateEnabled() {
+				logger.Printf("auto-update: release %s available, installing...", st.LatestVersion)
+				res, err := performSelfUpdate()
+				if err != nil {
+					logger.Printf("auto-update failed: %v", err)
+				} else {
+					// Binary replaced — stop checking; the next respawn
+					// runs the new build and starts a fresh checker.
+					logger.Printf("auto-update: %s", res.Message)
+					return
+				}
+			}
 			time.Sleep(updateCheckTTL)
 		}
 	}()

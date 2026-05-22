@@ -30,6 +30,19 @@ func main() {
 		return
 	}
 
+	// --self-update: download + install the latest release, then exit.
+	// Lets a SessionStart hook (or a manual run) upgrade the binary
+	// without going through the self_update MCP tool.
+	if len(os.Args) > 1 && os.Args[1] == "--self-update" {
+		res, err := performSelfUpdate()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "self-update failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(res.Message)
+		return
+	}
+
 	initSession()
 	initHaiku()
 	loadBrowserConfig()
