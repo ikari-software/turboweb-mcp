@@ -81,6 +81,7 @@ For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 func registerAllTools(s *server.MCPServer) {
 	registerBrowserTools(s)
 	registerDomTools(s)
+	registerFormTools(s)
 	registerInteractionTools(s)
 	registerJsTools(s)
 	registerDebugTools(s)

@@ -635,6 +635,40 @@ describe('dispatch', () => {
     expect(result).toEqual({ found: 1, results: [{ text: 'hi' }] });
   });
 
+  it('inspect_form — without url, routes straight to toContent', async () => {
+    chrome.tabs.query.mockResolvedValue([{ id: 4 }]);
+    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (cb) cb({ form: { action: '' }, fields: [] });
+    });
+    const result = await api.dispatch('inspect_form', { formSelector: '#f' });
+    // No navigation occurred — only the content-script inspect ran.
+    expect(chrome.tabs.update).not.toHaveBeenCalled();
+    expect(result).toEqual({ form: { action: '' }, fields: [] });
+  });
+
+  it('inspect_form — with url already on target, skips navigation', async () => {
+    chrome.tabs.get.mockResolvedValue({ id: 4, url: 'https://app.example/new?x=1', status: 'complete' });
+    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (cb) cb({ form: {}, fields: [] });
+    });
+    await api.dispatch('inspect_form', { tabId: 4, url: 'https://app.example/new' });
+    // Same origin+path as the tab's URL — no navigation needed.
+    expect(chrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('inspect_form — with url off target, navigates then inspects', async () => {
+    chrome.tabs.get.mockResolvedValue({ id: 4, url: 'https://other.example/', status: 'complete' });
+    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (cb) cb({ form: {}, fields: [] });
+    });
+    await api.dispatch('inspect_form', { tabId: 4, url: 'https://app.example/new' });
+    // Off-target tab — navigate to the base URL first.
+    expect(chrome.tabs.update).toHaveBeenCalledWith(4, { url: 'https://app.example/new' });
+  });
+
   it('throws for unknown action', async () => {
     await expect(api.dispatch('nonexistent', {})).rejects.toThrow('Unknown action');
   });

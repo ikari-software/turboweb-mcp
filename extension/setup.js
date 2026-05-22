@@ -43,6 +43,7 @@ globalThis.chrome = {
     captureVisibleTab: vi.fn().mockResolvedValue('data:image/jpeg;base64,AAAA'),
     onActivated: makeEvent(),
     onRemoved: makeEvent(),
+    onUpdated: makeEvent(),
   },
   scripting: {
     executeScript: vi.fn().mockResolvedValue([{ result: {} }]),

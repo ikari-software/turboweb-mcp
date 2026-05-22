@@ -391,6 +391,80 @@
     return { viewport: viewport(), count: els.length, elements: out };
   }
 
+  // --- Form inspection (try_url_prefill discovery + verification) ---
+  // Returns a descriptor of one form: its action/method and every field's
+  // metadata. The Go orchestrator maps formData keys to URL params off this,
+  // then re-calls it post-navigation to verify which fields got populated.
+  function inspectForm({ selector } = {}) {
+    // Resolve the target form. An explicit selector wins; otherwise pick the
+    // <form> with the most fields. Many SPAs skip <form> entirely, so when
+    // there are none, fall back to the whole document as the field container.
+    let form = null;
+    if (selector) {
+      form = document.querySelector(selector);
+      if (!form) throw new Error('Form not found: ' + selector);
+    } else {
+      let best = null, bestCount = -1;
+      for (const f of document.querySelectorAll('form')) {
+        const n = f.querySelectorAll('input,select,textarea,[contenteditable]').length;
+        if (n > bestCount) { best = f; bestCount = n; }
+      }
+      form = best; // may stay null — handled below
+    }
+
+    const container = form || document.body;
+    const fieldEls = container.querySelectorAll(
+      'input,select,textarea,[contenteditable=""],[contenteditable="true"]');
+
+    const fields = [];
+    for (const el of fieldEls) {
+      // Skip inputs that can't carry a user value.
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (el.tagName === 'INPUT' && (type === 'hidden' || type === 'submit'
+        || type === 'button' || type === 'reset' || type === 'image')) continue;
+
+      // Detect contenteditable from the attribute (an empty or "true"
+      // value both enable it) rather than el.isContentEditable, which
+      // also flips true for descendants of an editable host.
+      const ceAttr = el.getAttribute('contenteditable');
+      const isCE = el.tagName !== 'INPUT' && el.tagName !== 'SELECT'
+        && el.tagName !== 'TEXTAREA' && (ceAttr === '' || ceAttr === 'true');
+      const r = el.getBoundingClientRect();
+      // value reading mirrors typeText's verify path: native .value for
+      // inputs, .textContent for contenteditable — same value the agent sees.
+      const value = isCE ? (el.textContent || '') : (el.value || '');
+      fields.push({
+        tag: el.tagName.toLowerCase(),
+        type: isCE ? 'contenteditable' : (el.tagName === 'INPUT' ? (el.type || 'text') : el.tagName.toLowerCase()),
+        name: el.getAttribute('name') || '',
+        id: el.id || '',
+        placeholder: el.getAttribute('placeholder') || '',
+        label: labelFor(el) || '',
+        ariaLabel: el.getAttribute('aria-label') || '',
+        required: !!el.required,
+        disabled: !!el.disabled,
+        value,
+        visible: r.width > 0 && r.height > 0,
+        // A framework-controlled widget: contenteditable, or a custom role
+        // on a non-native field. Heuristic — surfaced so the agent can
+        // decide whether URL prefill is likely to stick.
+        frameworkControlled: isCE || (!!el.getAttribute('role') && el.tagName !== 'INPUT'
+          && el.tagName !== 'SELECT' && el.tagName !== 'TEXTAREA'),
+        selector: sel(el),
+      });
+    }
+
+    return {
+      form: {
+        action: form ? (form.getAttribute('action') || '') : '',
+        method: form ? (form.getAttribute('method') || 'get') : '',
+        selector: form ? sel(form) : '',
+        location: location.href,
+      },
+      fields,
+    };
+  }
+
   // --- Page capability probe ---
   // Best-effort diagnostics so an agent can route around a page's constraints
   // up front instead of discovering each broken tool one failed call at a
@@ -1930,6 +2004,7 @@
       inspect: (p) => inspectElement(p),
       get_interactive_map: () => getInteractiveMap(),
       query_elements: (p) => queryElements(p),
+      inspect_form: (p) => inspectForm(p),
       page_capabilities: () => pageCapabilities(),
       click: (p) => clickElement(p),
       type_text: (p) => typeText(p),

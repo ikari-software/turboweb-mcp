@@ -12,6 +12,9 @@ const CONTENT_SCRIPT_INIT_DELAY_MS = 50;
 const NATIVE_HEALTH_TIMEOUT_MS = 200;
 const NATIVE_RESIZE_TIMEOUT_MS = 5000;
 const NATIVE_RECHECK_INTERVAL_MS = 30000;
+// How long inspect_form waits for a freshly-navigated tab to reach
+// status:'complete' before inspecting anyway (slow SPA tolerance).
+const INSPECT_FORM_NAV_TIMEOUT_MS = 8000;
 
 // --- Telemetry & popup communication ---
 const stats = { commands: 0, errors: 0, totalMs: 0, startedAt: Date.now() };
@@ -382,6 +385,34 @@ async function toContent(tabId, action, params = {}) {
         resolve(response);
       }
     });
+  });
+}
+
+// waitForTabComplete resolves once the tab reaches status:'complete', or
+// after timeoutMs — whichever comes first. inspect_form uses it to wait out
+// a freshly-issued navigation before inspecting the form. On timeout it
+// resolves (rather than rejecting) so the caller inspects whatever loaded;
+// verification then reports whatever it finds.
+function waitForTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    const timer = setTimeout(finish, timeoutMs);
+    // Guard against the navigation having already completed before the
+    // listener was attached.
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab && tab.status === 'complete') finish();
+    }).catch(() => {});
   });
 }
 
@@ -958,6 +989,31 @@ async function dispatch(action, params) {
 
     case 'inject_script':
       return await toContent(params.tabId, 'inject_script', { code: params.code });
+
+    case 'inspect_form': {
+      // try_url_prefill's discovery/verification action. If `url` is given
+      // (the Phase A call) and the tab is not already on that origin+path,
+      // navigate there first and wait for load — so "navigate to base, then
+      // inspect" is a single action from the Go orchestrator's perspective.
+      // Without `url` (the verify call) it just inspects the current page.
+      const tid = await resolveTab(params.tabId);
+      if (params.url) {
+        let onTarget = false;
+        try {
+          const tab = await chrome.tabs.get(tid);
+          if (tab && tab.url) {
+            const cur = new URL(tab.url);
+            const want = new URL(params.url);
+            onTarget = cur.origin === want.origin && cur.pathname === want.pathname;
+          }
+        } catch { onTarget = false; }
+        if (!onTarget) {
+          await chrome.tabs.update(tid, { url: params.url });
+          await waitForTabComplete(tid, INSPECT_FORM_NAV_TIMEOUT_MS);
+        }
+      }
+      return await toContent(tid, 'inspect_form', { selector: params.formSelector });
+    }
 
     // --- Chrome's built-in Gemini Nano (Prompt API / Built-in AI) ---
     // Used by the Go server's local-AI fallback so users without an

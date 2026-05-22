@@ -36,7 +36,7 @@ beforeAll(() => {
 
   const fns = [
     'sel', 'viewport', 'extractText', 'findText', 'inspectElement',
-    'getInteractiveMap', 'queryElements', 'pageCapabilities',
+    'getInteractiveMap', 'queryElements', 'inspectForm', 'pageCapabilities',
     'clickElement', 'typeText',
     'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
     'executeJS', 'injectScript',
@@ -899,5 +899,91 @@ describe('message handler', () => {
     const sendResponse = vi.fn();
     const result = messageHandler({ action: 'inject_script', params: { code: 'return 1' } }, null, sendResponse);
     expect(result).toBe(true); // signals async response
+  });
+});
+
+describe('inspectForm', () => {
+  it('returns field descriptors with resolved labels, values and flags', () => {
+    document.body.innerHTML =
+      '<form action="/submit" method="post">' +
+      '  <label for="wf">Workflow ID</label>' +
+      '  <input id="wf" name="workflowId" type="text" value="order-1" required>' +
+      '  <input name="taskQueue" type="text" aria-label="Task Queue">' +
+      '  <input name="token" type="password">' +
+      '  <input name="locked" type="text" disabled>' +
+      '  <select name="region"><option value="eu">EU</option></select>' +
+      '  <textarea name="notes">hello</textarea>' +
+      '  <input type="hidden" name="csrf" value="xyz">' +
+      '</form>';
+    mockAllRects();
+    const result = api.inspectForm({});
+
+    expect(result.form.action).toBe('/submit');
+    expect(result.form.method).toBe('post');
+
+    // Hidden input is excluded; the 6 user-fillable fields remain.
+    const names = result.fields.map(f => f.name);
+    expect(names).toEqual(['workflowId', 'taskQueue', 'token', 'locked', 'region', 'notes']);
+
+    const wf = result.fields.find(f => f.name === 'workflowId');
+    expect(wf).toMatchObject({
+      tag: 'input', type: 'text', id: 'wf',
+      label: 'Workflow ID', value: 'order-1', required: true,
+    });
+
+    const tq = result.fields.find(f => f.name === 'taskQueue');
+    expect(tq.ariaLabel).toBe('Task Queue');
+
+    const token = result.fields.find(f => f.name === 'token');
+    expect(token.type).toBe('password');
+
+    const locked = result.fields.find(f => f.name === 'locked');
+    expect(locked.disabled).toBe(true);
+
+    const notes = result.fields.find(f => f.name === 'notes');
+    expect(notes).toMatchObject({ tag: 'textarea', value: 'hello' });
+  });
+
+  it('reads contenteditable value from textContent (typeText parity)', () => {
+    document.body.innerHTML =
+      '<form><div contenteditable="true" id="ce">live text</div></form>';
+    mockAllRects();
+    const result = api.inspectForm({});
+    const ce = result.fields[0];
+    expect(ce.type).toBe('contenteditable');
+    expect(ce.value).toBe('live text');
+    expect(ce.frameworkControlled).toBe(true);
+  });
+
+  it('picks the largest form when multiple forms exist', () => {
+    document.body.innerHTML =
+      '<form id="small"><input name="a"></form>' +
+      '<form id="big"><input name="b"><input name="c"><input name="d"></form>';
+    mockAllRects();
+    const result = api.inspectForm({});
+    expect(result.fields.map(f => f.name)).toEqual(['b', 'c', 'd']);
+  });
+
+  it('honors an explicit formSelector', () => {
+    document.body.innerHTML =
+      '<form id="small"><input name="a"></form>' +
+      '<form id="big"><input name="b"><input name="c"></form>';
+    mockAllRects();
+    const result = api.inspectForm({ selector: '#small' });
+    expect(result.fields.map(f => f.name)).toEqual(['a']);
+  });
+
+  it('throws when an explicit selector matches nothing', () => {
+    document.body.innerHTML = '<form><input name="a"></form>';
+    expect(() => api.inspectForm({ selector: '#missing' })).toThrow(/not found/);
+  });
+
+  it('falls back to the document when the page has no <form>', () => {
+    document.body.innerHTML =
+      '<div><input name="bare1"><input name="bare2"></div>';
+    mockAllRects();
+    const result = api.inspectForm({});
+    expect(result.form.selector).toBe(''); // no form element
+    expect(result.fields.map(f => f.name)).toEqual(['bare1', 'bare2']);
   });
 });
