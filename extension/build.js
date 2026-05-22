@@ -51,6 +51,10 @@ function build() {
     if (target === 'firefox') {
       // Firefox MV3: uses scripts array, not service_worker
       m.background = { scripts: ['background.js'] };
+      // Firefox has no chrome.debugger API — the cdp_* tools are Chrome-only
+      // (Firefox uses WebDriver BiDi instead). Strip the permission so the
+      // signed XPI doesn't trip an "unknown permission" lint warning.
+      m.permissions = m.permissions.filter((p) => p !== 'debugger');
       // Add gecko settings
       // update_url enables auto-update for the self-distributed (unlisted)
       // signed XPI. Firefox polls this JSON daily; when version > installed,
