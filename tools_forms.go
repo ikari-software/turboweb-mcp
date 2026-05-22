@@ -80,6 +80,11 @@ type formDescriptor struct {
 		Location string `json:"location"`
 	} `json:"form"`
 	Fields []formField `json:"fields"`
+	// NavTimedOut is set by the inspect_form extension handler when a
+	// pre-inspection navigation hit its load timeout — it lets the
+	// orchestrator distinguish "navigation timed out" from "the page
+	// genuinely has no form".
+	NavTimedOut bool `json:"navTimedOut"`
 }
 
 // --- field -> URL-param mapping ---
@@ -433,9 +438,14 @@ func handleTryURLPrefill(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		return textResult(map[string]any{"prefilled": false, "error": "inspect_form returned unexpected payload: " + err.Error()})
 	}
 	if len(descA.Fields) == 0 {
+		errMsg := "no form fields found on the page — nothing to prefill"
+		if descA.NavTimedOut {
+			errMsg = "navigation to the form page timed out before it finished loading — " +
+				"no form fields seen yet; retry once the page settles"
+		}
 		return textResult(map[string]any{
 			"prefilled": false,
-			"error":     "no form fields found on the page — nothing to prefill",
+			"error":     errMsg,
 		})
 	}
 
@@ -466,7 +476,10 @@ func handleTryURLPrefill(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	if intent := extractIntent(args); intent != "" {
 		navParams["_intent"] = intent
 	}
-	if _, err := send("navigate", navParams); err != nil {
+	// Give navigate an explicit timeout rather than inheriting the 30s
+	// default — in line with the sibling inspect_form calls (8000ms). 15s
+	// is ample for a same-origin navigation while still bounding a stall.
+	if _, err := send("navigate", navParams, 15000); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 

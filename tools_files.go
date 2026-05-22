@@ -59,11 +59,11 @@ func registerFileTools(s *server.MCPServer) {
 					"If the target resolves to an <input type=file> it assigns input.files directly instead. "+
 					"Some frameworks that gate on event.isTrusted will ignore this — prefer set_input_files when a file input exists.",
 			),
-			mcp.WithString("target_selector", mcp.Required(),
+			mcp.WithString("selector", mcp.Required(),
 				mcp.Description("CSS selector of the drop zone (the element with the drop handler, a wrapper, or an <input type=file>)")),
-			mcp.WithString("local_file_path", mcp.Required(),
+			mcp.WithString("localFilePath", mcp.Required(),
 				mcp.Description("Absolute filesystem path on the MCP server host. Relative paths are rejected; ~/foo is expanded; symlinks are resolved.")),
-			mcp.WithString("mime_type",
+			mcp.WithString("mimeType",
 				mcp.Description("Override the File MIME type. Default: sniffed from the file extension, falling back to application/octet-stream.")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
@@ -193,16 +193,16 @@ func handleInterceptFileChooser(_ context.Context, req mcp.CallToolRequest) (*mc
 // never traverse the WS channel — only the small token/metadata JSON does.
 func handleDragDropFile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	selector := toString(args["target_selector"])
+	selector := toString(args["selector"])
 	if selector == "" {
-		return mcp.NewToolResultError("target_selector is required"), nil
+		return mcp.NewToolResultError("selector is required"), nil
 	}
-	rawPath := toString(args["local_file_path"])
-	absPath, info, err := resolveHostPath(rawPath, "local_file_path")
+	rawPath := toString(args["localFilePath"])
+	absPath, info, err := resolveHostPath(rawPath, "localFilePath")
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	mimeType := sniffMimeType(toString(args["mime_type"]), absPath)
+	mimeType := sniffMimeType(toString(args["mimeType"]), absPath)
 
 	// Start the loopback file host (idempotent) and mint a one-shot grant
 	// for exactly this file.
@@ -219,9 +219,11 @@ func handleDragDropFile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	// :18323 HTTP channel. The token is intentionally not echoed into any
 	// intent/log surface.
 	fwd := rawArgs(args)
-	delete(fwd, "local_file_path")
-	delete(fwd, "mime_type")
-	fwd["target_selector"] = selector
+	delete(fwd, "localFilePath")
+	fwd["selector"] = selector
+	// The sniffed/overridden MIME type is forwarded below as fwd["mimeType"];
+	// drop the raw input arg of the same name so it cannot shadow it.
+	delete(fwd, "mimeType")
 	fwd["fileName"] = filepath.Base(absPath)
 	fwd["mimeType"] = mimeType
 	fwd["size"] = info.Size()

@@ -396,26 +396,28 @@ async function toContent(tabId, action, params = {}) {
 // after timeoutMs — whichever comes first. inspect_form uses it to wait out
 // a freshly-issued navigation before inspecting the form. On timeout it
 // resolves (rather than rejecting) so the caller inspects whatever loaded;
-// verification then reports whatever it finds.
+// verification then reports whatever it finds. The resolved value carries
+// `timedOut` so the caller can distinguish "navigation timed out" from
+// "the page genuinely settled".
 function waitForTabComplete(tabId, timeoutMs) {
   return new Promise((resolve) => {
     let done = false;
-    const finish = () => {
+    const finish = (timedOut) => {
       if (done) return;
       done = true;
       chrome.tabs.onUpdated.removeListener(listener);
       clearTimeout(timer);
-      resolve();
+      resolve({ timedOut });
     };
     const listener = (id, info) => {
-      if (id === tabId && info.status === 'complete') finish();
+      if (id === tabId && info.status === 'complete') finish(false);
     };
     chrome.tabs.onUpdated.addListener(listener);
-    const timer = setTimeout(finish, timeoutMs);
+    const timer = setTimeout(() => finish(true), timeoutMs);
     // Guard against the navigation having already completed before the
     // listener was attached.
     chrome.tabs.get(tabId).then((tab) => {
-      if (tab && tab.status === 'complete') finish();
+      if (tab && tab.status === 'complete') finish(false);
     }).catch(() => {});
   });
 }
@@ -750,7 +752,7 @@ async function resizeLocal(dataUrl, maxWidth, quality) {
  * @param {number} [tabId] - Tab to capture (defaults to active tab)
  * @param {number} [maxWidth=1280] - Maximum width in pixels for the resized image
  * @param {number} [quality=70] - JPEG quality (0-100)
- * @returns {{ base64: string, width: number, height: number, mimeType: string }}
+ * @returns {{ base64: string, width: number, height: number, mimeType: string, url: string }}
  */
 async function screenshot(tabId, maxWidth = 1280, quality = 70) {
   const tid = await resolveTab(tabId);
@@ -778,7 +780,9 @@ async function screenshot(tabId, maxWidth = 1280, quality = 70) {
     result = await resizeLocal(dataUrl, maxWidth, quality);
   }
 
-  return { base64: result.data, width: result.width, height: result.height, mimeType: 'image/jpeg' };
+  // Carry the tab's current URL so screenshot_diff can detect a navigation
+  // between baseline and after captures (the Go side short-circuits on it).
+  return { base64: result.data, width: result.width, height: result.height, mimeType: 'image/jpeg', url: tab.url || '' };
 }
 
 // --- Execute JS in page's MAIN world ---
@@ -930,7 +934,7 @@ async function dispatch(action, params) {
     // token + metadata travel through here.
     case 'drag_drop_file':
       return await toContent(params.tabId, 'drag_drop_file', {
-        target_selector: params.target_selector,
+        selector: params.selector,
         fileName: params.fileName,
         mimeType: params.mimeType,
         size: params.size,
@@ -1041,6 +1045,7 @@ async function dispatch(action, params) {
       // inspect" is a single action from the Go orchestrator's perspective.
       // Without `url` (the verify call) it just inspects the current page.
       const tid = await resolveTab(params.tabId);
+      let navTimedOut = false;
       if (params.url) {
         let onTarget = false;
         try {
@@ -1053,10 +1058,14 @@ async function dispatch(action, params) {
         } catch { onTarget = false; }
         if (!onTarget) {
           await chrome.tabs.update(tid, { url: params.url });
-          await waitForTabComplete(tid, INSPECT_FORM_NAV_TIMEOUT_MS);
+          // navTimedOut lets the Go side tell "navigation timed out" apart
+          // from "page genuinely has no form".
+          const w = await waitForTabComplete(tid, INSPECT_FORM_NAV_TIMEOUT_MS);
+          navTimedOut = !!(w && w.timedOut);
         }
       }
-      return await toContent(tid, 'inspect_form', { selector: params.formSelector });
+      const formResult = await toContent(tid, 'inspect_form', { selector: params.formSelector });
+      return { ...formResult, navTimedOut };
     }
 
     // --- screenshot_diff content-bridge actions ---

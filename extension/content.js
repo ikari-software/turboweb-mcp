@@ -1004,15 +1004,15 @@
   // File/DataTransfer/DragEvent are constructed in the page's own JS realm —
   // framework `instanceof File` checks and React's nativeEvent reads then
   // pass. See design/drag_drop_file.md §3.3.
-  async function dragDropFile({ target_selector, fileName, mimeType, size, fileToken, fileHostPort }) {
-    if (!target_selector) throw new Error('target_selector is required');
+  async function dragDropFile({ selector, fileName, mimeType, size, fileToken, fileHostPort }) {
+    if (!selector) throw new Error('selector is required');
 
     // 1. Resolve + sanity-check the target before fetching anything.
-    const target = document.querySelector(target_selector);
-    if (!target) throw new Error('No element matches selector: ' + target_selector);
+    const target = document.querySelector(selector);
+    if (!target) throw new Error('No element matches selector: ' + selector);
     const rect = target.getBoundingClientRect();
     if (rect.width < 1 && rect.height < 1) {
-      throw new Error('Target element has a zero-size bounding box: ' + target_selector +
+      throw new Error('Target element has a zero-size bounding box: ' + selector +
         ' (an invisible element is almost certainly the wrong drop target)');
     }
 
@@ -1038,7 +1038,7 @@
     // 3. Hand the Blob to a MAIN-world script which builds the File +
     //    DataTransfer in the page realm and dispatches the drop. Blobs
     //    structured-clone cleanly across the postMessage realm boundary.
-    return await runDropInPage(target_selector, blob, fileName, mimeType, size);
+    return await runDropInPage(selector, blob, fileName, mimeType, size);
   }
 
   // __turboPerformDrop is the page-realm drop logic. It is defined here so
@@ -1096,10 +1096,19 @@
         return ev;
       };
       fire('dragenter');
-      fire('dragover');
-      fire('drop');
+      // A drop zone signals it accepts the payload by preventDefault()-ing
+      // dragover and drop. If neither was prevented the page rejected the
+      // drop — surface that as a warning rather than reporting silent
+      // success.
+      const overEv = fire('dragover');
+      const dropEv = fire('drop');
       result.method = 'drop';
       result.events_dispatched = ['dragenter', 'dragover', 'drop'];
+      if (!overEv.defaultPrevented && !dropEv.defaultPrevented) {
+        result.warnings.push('drop zone did not preventDefault() on dragover/drop — ' +
+          'the page did not accept the drop; it may not be a real drop target ' +
+          '(consider set_input_files if a file input exists)');
+      }
     }
 
     // Give async handlers a beat, then report whether anything moved. A
@@ -1140,7 +1149,7 @@
         if (r.error) { reject(new Error(r.error)); return; }
         resolve({
           dropped: true,
-          target_selector: selector,
+          selector,
           method: r.method,
           file: { name: fileName, size, type: mimeType },
           events_dispatched: r.events_dispatched || [],
@@ -1223,6 +1232,10 @@
     let badgeTimer = null;
     let idleFadeTimer = null;
     let cursorPos = { x: window.innerWidth / 2, y: -40 };
+    // The glyph's "active point" within its 24×24 box — the arrow's tip,
+    // the centre of the eyes, the hand's fingertip. setCursorMode swaps it
+    // so whichever glyph is shown still lands precisely on the target.
+    let cursorHotspot = { x: 5, y: 3 };
     // After this much agent inactivity the cursor and badge fade away so
     // they don't permanently obscure the page.
     const IDLE_FADE_MS = 45_000;
@@ -1294,7 +1307,7 @@
       const x = r.left + anchor.offsetX;
       const y = r.top + anchor.offsetY;
       cursorPos = { x, y };
-      cursor.style.transform = `translate(${x - 4}px, ${y - 4}px)`;
+      cursor.style.transform = `translate(${x - cursorHotspot.x}px, ${y - cursorHotspot.y}px)`;
     }
 
     function setAnchor(el, x, y) {
@@ -1386,7 +1399,16 @@
           filter: drop-shadow(0 4px 8px rgba(0,0,0,0.4));
         }
         .cursor.on { opacity: 1; }
-        .cursor svg.pointer { width: 24px; height: 24px; display: block; }
+        /* Three interchangeable glyphs share the one 24×24 box; the active
+           mode class picks which is shown. Default = arrow pointer;
+           .reading = a pair of eyes (read/scan ops); .clicking = a pointing
+           hand (clicks). setCursorMode() flips the class and the hotspot. */
+        .cursor .cursor-glyph { width: 24px; height: 24px; display: none; }
+        .cursor .glyph-pointer { display: block; }
+        .cursor.reading .glyph-pointer,
+        .cursor.clicking .glyph-pointer { display: none; }
+        .cursor.reading .glyph-eyes { display: block; }
+        .cursor.clicking .glyph-hand { display: block; }
         /* Robot is a small "name tag" attached above-right of the pointer
            so it doesn't fight the pointer for the user's eye. The
            pointer's tip is what marks the click point; the robot just
@@ -1403,7 +1425,7 @@
           transition: background 220ms ease;
         }
         .cursor .robot svg { width: 9px; height: 9px; }
-        .cursor.click .pointer { animation: clickPulse 350ms ease-out; }
+        .cursor.click .cursor-glyph { animation: clickPulse 350ms ease-out; }
         @keyframes clickPulse {
           0%   { transform: scale(1); }
           40%  { transform: scale(0.78); }
@@ -1497,24 +1519,25 @@
           margin-top: 4px;
           font-size: 11px; color: hsl(var(--client-hue, 40), 60%, 62%);
         }
-        /* Loupe: a glowing ring shown over each match during read-only
+        /* Loupe: glowing rings shown over each match during read-only
            scans (find_text, extract_text). Communicates "the agent looked
-           here" even though no actual click happens. */
+           here". Deliberately the inverse of the click ripple — the rings
+           start at a large radius and contract *inward* toward the point,
+           so a read reads as "focusing in", never as a tap landing. */
         .loupe {
           position: fixed;
-          width: 64px; height: 64px;
-          margin-left: -32px; margin-top: -32px;
-          border: 3px solid #58a6ff;
+          width: 60px; height: 60px;
+          margin-left: -30px; margin-top: -30px;
+          border: 2.5px solid #58a6ff;
           border-radius: 50%;
-          background: radial-gradient(circle, rgba(88, 166, 255, 0.18), transparent 70%);
-          box-shadow: 0 0 14px rgba(88, 166, 255, 0.55), inset 0 0 8px rgba(88, 166, 255, 0.4);
+          box-shadow: 0 0 10px rgba(88, 166, 255, 0.5), inset 0 0 6px rgba(88, 166, 255, 0.35);
           pointer-events: none;
-          animation: loupeIn 360ms ease-out forwards;
+          animation: loupeFocus 640ms cubic-bezier(0.33, 0, 0.35, 1) forwards;
         }
-        @keyframes loupeIn {
-          0%   { opacity: 0;   transform: scale(0.55); }
-          45%  { opacity: 1;   transform: scale(1.1);  }
-          100% { opacity: 0;   transform: scale(1);    }
+        @keyframes loupeFocus {
+          0%   { opacity: 0;    transform: scale(2.6); }
+          38%  { opacity: 0.95; transform: scale(1.5); }
+          100% { opacity: 0;    transform: scale(0.32); }
         }
         /* Scan-flash: a thin outline pulse drawn around every interactive
            element after get_interactive_map, so the user sees "the agent
@@ -1536,9 +1559,8 @@
            returns an error. The wrapper carries the position transform
            via JS, so we shake the inner SVG instead to avoid clobbering
            the cursor's coordinates. */
-        .cursor.error svg.pointer path { fill: #f85149; stroke: #4d1313; }
+        .cursor.error .cursor-glyph { animation: shake 420ms ease-out; filter: drop-shadow(0 0 4px rgba(248, 81, 73, 0.9)); }
         .cursor.error .robot { background: #f85149; box-shadow: 0 0 10px rgba(248, 81, 73, 0.7); }
-        .cursor.error svg.pointer { animation: shake 420ms ease-out; }
         @keyframes shake {
           0%, 100% { transform: translateX(0)  scale(1); }
           15%      { transform: translateX(-5px) scale(1); }
@@ -1656,10 +1678,24 @@
 
       cursor = document.createElement('div');
       cursor.className = 'cursor';
+      // Three glyphs, one shown at a time per the mode class (see CSS):
+      // arrow pointer (default), eyes (reads), pointing hand (clicks).
       cursor.innerHTML = `
-        <svg class="pointer" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <svg class="cursor-glyph glyph-pointer" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M5 3 L5 19 L9.5 15 L11.6 21 L14.4 20 L12.3 14 L18 14 Z"
                 fill="#fff" stroke="#0d1117" stroke-width="1.4" stroke-linejoin="round"/>
+        </svg>
+        <svg class="cursor-glyph glyph-eyes" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <ellipse cx="8" cy="12" rx="5.4" ry="3.9" fill="#fff" stroke="#0d1117" stroke-width="1.3"/>
+          <ellipse cx="16" cy="12" rx="5.4" ry="3.9" fill="#fff" stroke="#0d1117" stroke-width="1.3"/>
+          <circle cx="9.4" cy="12" r="2" fill="#0d1117"/>
+          <circle cx="17.4" cy="12" r="2" fill="#0d1117"/>
+        </svg>
+        <svg class="cursor-glyph glyph-hand" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M8.5 3.2 a1.5 1.5 0 0 1 3 0 v7.3 l1.1-0.3 a1.3 1.3 0 0 1 1.6 1.1
+                   a1.3 1.3 0 0 1 1.7 1.0 a1.3 1.3 0 0 1 1.6 1.2 v3.6 a4 4 0 0 1-4 4
+                   h-2.3 a4.2 4.2 0 0 1-3.6-2.1 l-2.4-4.2 a1.35 1.35 0 0 1 2-1.7 l1.3 1.1 z"
+                fill="#fff" stroke="#0d1117" stroke-width="1.3" stroke-linejoin="round"/>
         </svg>
         <div class="robot">${robotSVG(13, '#0d1117')}</div>
       `;
@@ -1770,11 +1806,10 @@
           const u = 1 - eased;
           const cx = u * u * start.x + 2 * u * eased * midX + eased * eased * x;
           const cy = u * u * start.y + 2 * u * eased * midY + eased * eased * y;
-          // The pointer SVG path starts at "M5 3" — the visible tip is
-          // at offset (5, 3) inside the 24×24 wrapper. Offset the
-          // translate by that amount so the tip lands exactly on
-          // (x, y), not the wrapper's top-left corner.
-          cursor.style.transform = `translate(${cx - 5}px, ${cy - 3}px)`;
+          // Offset by the active glyph's hotspot so its meaningful point
+          // (arrow tip, eye centre, fingertip) lands exactly on (x, y),
+          // not the wrapper's top-left corner.
+          cursor.style.transform = `translate(${cx - cursorHotspot.x}px, ${cy - cursorHotspot.y}px)`;
           if (t < 1) requestAnimationFrame(step);
           else {
             cursorPos = { x, y };
@@ -1783,6 +1818,25 @@
         }
         requestAnimationFrame(step);
       });
+    }
+
+    // setCursorMode swaps the cursor glyph: '' = arrow pointer (default,
+    // for type/navigate/etc.), 'reading' = eyes (find_text, query_elements,
+    // DOM reads), 'clicking' = pointing hand (click/cdp_click). The hotspot
+    // moves with the glyph so the active point still lands on the target.
+    function setCursorMode(mode) {
+      ensure();
+      if (!cursor) return;
+      cursor.classList.remove('reading', 'clicking');
+      if (mode === 'reading') {
+        cursor.classList.add('reading');
+        cursorHotspot = { x: 12, y: 12 };
+      } else if (mode === 'clicking') {
+        cursor.classList.add('clicking');
+        cursorHotspot = { x: 10, y: 2 };
+      } else {
+        cursorHotspot = { x: 5, y: 3 };
+      }
     }
 
     function clickPulse() {
@@ -1974,12 +2028,18 @@
     function loupeAt(x, y) {
       ensure();
       if (!root) return;
-      const l = document.createElement('div');
-      l.className = 'loupe';
-      l.style.left = x + 'px';
-      l.style.top = y + 'px';
-      root.appendChild(l);
-      setTimeout(() => l.remove(), 380);
+      // Three concentric rings, staggered, each contracting inward toward
+      // (x, y) — an inward ripple that reads as "focusing in / looking
+      // here", the deliberate opposite of the outward click ripple.
+      for (let i = 0; i < 3; i++) {
+        const l = document.createElement('div');
+        l.className = 'loupe';
+        l.style.left = x + 'px';
+        l.style.top = y + 'px';
+        l.style.animationDelay = (i * 110) + 'ms';
+        root.appendChild(l);
+        setTimeout(() => l.remove(), 640 + i * 110 + 80);
+      }
     }
 
     // scanFlash: outline-pulse a list of element bboxes briefly. Used by
@@ -2057,6 +2117,7 @@
       // on the next scroll; the sweep doesn't have stable elements to
       // anchor to (loupe positions are raw viewport bboxes).
       clearAnchor();
+      setCursorMode('reading');
       for (const it of items) {
         if (!it || typeof it.x !== 'number') continue;
         const cx = it.x + (it.w || 0) / 2;
@@ -2240,10 +2301,10 @@
           return { el, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'inspect' };
         }
       }
-      if (action === 'drag_drop_file' && params.target_selector) {
+      if (action === 'drag_drop_file' && params.selector) {
         // Animate the cursor to the drop zone itself — it is the visible
         // thing the user would drag a file onto.
-        const el = document.querySelector(params.target_selector);
+        const el = document.querySelector(params.selector);
         if (el) {
           const r = el.getBoundingClientRect();
           if (r.width > 0 || r.height > 0) {
@@ -2274,6 +2335,14 @@
       }
       return null;
     }
+
+    // Actions that make the agent cursor a pair of eyes — the agent is
+    // reading/scanning the page rather than acting on it.
+    const READING_ACTIONS = new Set([
+      'find_text', 'extract_text', 'inspect', 'get_interactive_map',
+      'get_html', 'page_yaml', 'get_page_structure', 'dom_snapshot',
+      'get_accessibility_tree', 'query_elements', 'describe', 'turbo_snapshot',
+    ]);
 
     // Read-only / state-only ops that don't have a specific cursor
     // animation in resolveTarget. Each value picks which visual the
@@ -2327,6 +2396,12 @@
         const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
         setBadge({ display, intent: intent || `${action}…` });
         if (intent) showToast(intent, display);
+
+        // Pick the cursor glyph for this action before it moves: a hand
+        // for clicks, eyes for reads/scans, the arrow for everything else.
+        if (action === 'click' || action === 'cdp_click') setCursorMode('clicking');
+        else if (READING_ACTIONS.has(action)) setCursorMode('reading');
+        else setCursorMode('');
 
         const target = resolveTarget(action, params);
         if (target) {

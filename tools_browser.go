@@ -72,15 +72,15 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- screenshot_diff ---
 	addTool(s,
 		mcp.NewTool("screenshot_diff",
-			mcp.WithDescription("Prove an action changed the page WITHOUT shipping screenshots to the model. Call once with no baseline to MINT a baseline_id (mark the before-state); call again with that baseline_id after your action to get a cheap JSON verdict: changed yes/no, similarity score, changed bounding-box regions, and a free MutationObserver DOM summary. The default return is pure JSON (a few hundred bytes) — set include_thumb to also get an annotated image. Capture `after` once the page is idle for reliable results."),
-			mcp.WithString("baseline_id", mcp.Description("Token from a previous screenshot_diff call. Diff the current page against that cached baseline.")),
-			mcp.WithString("before", mcp.Description("Base64 JPEG/PNG explicit before-image. Ignored if baseline_id is set.")),
+			mcp.WithDescription("Prove an action changed the page WITHOUT shipping screenshots to the model. Call once with no baseline to MINT a baselineId (mark the before-state); call again with that baselineId after your action to get a cheap JSON verdict: changed yes/no, similarity score, changed bounding-box regions, and a free MutationObserver DOM summary. The default return is pure JSON (a few hundred bytes) — set includeThumb to also get an annotated image. Capture `after` once the page is idle for reliable results."),
+			mcp.WithString("baselineId", mcp.Description("Token from a previous screenshot_diff call. Diff the current page against that cached baseline.")),
+			mcp.WithString("before", mcp.Description("Base64 JPEG/PNG explicit before-image. Ignored if baselineId is set.")),
 			mcp.WithString("after", mcp.Description("Base64 JPEG/PNG explicit after-image. If omitted the tool captures the current page state itself.")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 			mcp.WithNumber("threshold", mcp.Description("Per-pixel perceptual delta 0..1 above which a pixel counts as changed (default 0.10)")),
-			mcp.WithNumber("min_score", mcp.Description("Similarity 0..1 below which the verdict is 'changed' (default 0.997)")),
-			mcp.WithBoolean("include_thumb", mcp.Description("Append an annotated diff thumbnail image (default false — the point of the tool is to avoid shipping images)")),
-			mcp.WithBoolean("dom_signal", mcp.Description("Also fold in the MutationObserver DOM verdict (default true; nearly free)")),
+			mcp.WithNumber("minScore", mcp.Description("Similarity 0..1 below which the verdict is 'changed' (default 0.997)")),
+			mcp.WithBoolean("includeThumb", mcp.Description("Append an annotated diff thumbnail image (default false — the point of the tool is to avoid shipping images)")),
+			mcp.WithBoolean("domSignal", mcp.Description("Also fold in the MutationObserver DOM verdict (default true; nearly free)")),
 			mcp.WithBoolean("fast", mcp.Description("DOM-only fast path: when the DOM reports zero mutations, skip the after capture entirely and return changed:false (default true)")),
 		),
 		handleScreenshotDiff,
@@ -134,12 +134,12 @@ type capturedShot struct {
 // the next baseline, and returns the compact JSON verdict.
 func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	domSignalOn := getBool(args, "dom_signal", true)
+	domSignalOn := getBool(args, "domSignal", true)
 	fast := getBool(args, "fast", true)
-	includeThumb := getBool(args, "include_thumb", false)
+	includeThumb := getBool(args, "includeThumb", false)
 
 	// --- resolve the baseline source ---------------------------------
-	baselineID, _ := args["baseline_id"].(string)
+	baselineID, _ := args["baselineId"].(string)
 	beforeArg, _ := args["before"].(string)
 
 	if baselineID == "" && beforeArg == "" {
@@ -157,9 +157,13 @@ func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 			image: shot.data, domMark: mark, url: shot.url,
 		})
 		return textResult(map[string]any{
-			"baseline_id": id,
-			"minted":      true,
-			"viewport":    map[string]int{"w": shot.width, "h": shot.height},
+			"baselineId": id,
+			"minted":     true,
+			// changed is explicitly null on a mint: there is nothing to
+			// compare against yet, so an agent reading result.changed
+			// gets a deliberate null rather than undefined.
+			"changed":  nil,
+			"viewport": map[string]int{"w": shot.width, "h": shot.height},
 		})
 	}
 
@@ -171,7 +175,7 @@ func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		entry, ok := theBaselineCache.get(baselineID)
 		if !ok {
 			return mcp.NewToolResultError(fmt.Sprintf(
-				"baseline_id %q is unknown or expired (baselines live %s) — call screenshot_diff with no baseline to mint a fresh one",
+				"baselineId %q is unknown or expired (baselines live %s) — call screenshot_diff with no baseline to mint a fresh one",
 				baselineID, baselineCacheTTL)), nil
 		}
 		beforeBytes = entry.image
@@ -202,12 +206,12 @@ func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 	if fast && haveMeta && !meta.DOM.Partial && meta.DOM.Mutations == 0 &&
 		(beforeURL == "" || meta.URL == "" || meta.URL == beforeURL) {
 		return textResult(map[string]any{
-			"changed":       false,
-			"score":         1.0,
-			"pixel_skipped": true,
-			"dom":           meta.DOM,
-			"baseline_id":   baselineID,
-			"note":          "DOM reported zero mutations; after-capture skipped (fast path)",
+			"changed":      false,
+			"score":        1.0,
+			"pixelSkipped": true,
+			"dom":          meta.DOM,
+			"baselineId":   baselineID,
+			"note":         "DOM reported zero mutations; after-capture skipped (fast path)",
 		})
 	}
 
@@ -229,24 +233,37 @@ func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		afterURL = shot.url
 	}
 
+	// nextBaseline returns the baseline_id to echo back. When the caller
+	// passed an explicit baselineID, that baseline is reused verbatim — we
+	// do NOT mint+cache a fresh entry, because the 16-entry FIFO cache would
+	// otherwise evict the caller's own baseline after a few chained diffs.
+	// Only mint (cache the after image) when the diff was against an
+	// explicit `before` arg, where there is no caller-owned baseline to
+	// preserve.
+	nextBaseline := func() string {
+		if baselineID != "" {
+			return baselineID
+		}
+		return theBaselineCache.put(baselineEntry{image: afterBytes, url: afterURL})
+	}
+
 	// Navigation short-circuit: a URL change is itself the verdict (§7).
 	if beforeURL != "" && afterURL != "" && beforeURL != afterURL {
-		id := theBaselineCache.put(baselineEntry{image: afterBytes, url: afterURL})
 		return textResult(map[string]any{
-			"changed":     true,
-			"score":       0.0,
-			"navigated":   true,
-			"from_url":    beforeURL,
-			"to_url":      afterURL,
-			"dom":         meta.DOM,
-			"baseline_id": id,
+			"changed":    true,
+			"score":      0.0,
+			"navigated":  true,
+			"fromUrl":    beforeURL,
+			"toUrl":      afterURL,
+			"dom":        meta.DOM,
+			"baselineId": nextBaseline(),
 		})
 	}
 
 	// --- run the pixel diff ------------------------------------------
 	opts := DiffOpts{
 		Threshold: toFloat(args["threshold"]),
-		MinScore:  toFloat(args["min_score"]),
+		MinScore:  toFloat(args["minScore"]),
 		WantThumb: includeThumb,
 		Masks:     metaMasks(meta),
 	}
@@ -269,26 +286,22 @@ func handleScreenshotDiff(ctx context.Context, req mcp.CallToolRequest) (*mcp.Ca
 		}
 	}
 
-	// Cache the after image as the next baseline so chained verifications
-	// never re-upload (§2).
-	nextID := theBaselineCache.put(baselineEntry{image: afterBytes, url: afterURL})
-
 	out := map[string]any{
-		"changed":          res.Changed,
-		"score":            round3(res.Score),
-		"changed_fraction": round3(res.ChangedFraction),
-		"regions":          res.Regions,
-		"region_count":     res.RegionCount,
-		"viewport":         res.Viewport,
-		"scrolled":         res.Scrolled,
-		"baseline_id":      nextID,
-		"thumb_omitted":    !includeThumb,
+		"changed":         res.Changed,
+		"score":           round3(res.Score),
+		"changedFraction": round3(res.ChangedFraction),
+		"regions":         res.Regions,
+		"regionCount":     res.RegionCount,
+		"viewport":        res.Viewport,
+		"scrolled":        res.Scrolled,
+		"baselineId":      nextBaseline(),
+		"thumbOmitted":    !includeThumb,
 	}
 	if res.SizeChanged {
-		out["size_changed"] = true
+		out["sizeChanged"] = true
 	}
 	if res.LikelyAnimation {
-		out["likely_animation"] = true
+		out["likelyAnimation"] = true
 	}
 	if res.Scrolled {
 		out["note"] = "global vertical shift detected — regions skipped; re-baseline before relying on regions"

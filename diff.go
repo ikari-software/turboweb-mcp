@@ -27,7 +27,7 @@ type DiffRegion struct {
 	Y        int     `json:"y"`
 	W        int     `json:"w"`
 	H        int     `json:"h"`
-	AreaFrac float64 `json:"area_frac"`
+	AreaFrac float64 `json:"areaFrac"`
 	Label    string  `json:"label"`
 }
 
@@ -57,13 +57,13 @@ type DiffOpts struct {
 type DiffResult struct {
 	Changed         bool         `json:"changed"`
 	Score           float64      `json:"score"`
-	ChangedFraction float64      `json:"changed_fraction"`
+	ChangedFraction float64      `json:"changedFraction"`
 	Regions         []DiffRegion `json:"regions"`
-	RegionCount     int          `json:"region_count"`
+	RegionCount     int          `json:"regionCount"`
 	Viewport        DiffViewport `json:"viewport"`
 	Scrolled        bool         `json:"scrolled"`
-	SizeChanged     bool         `json:"size_changed,omitempty"`
-	LikelyAnimation bool         `json:"likely_animation,omitempty"`
+	SizeChanged     bool         `json:"sizeChanged,omitempty"`
+	LikelyAnimation bool         `json:"likelyAnimation,omitempty"`
 	// Thumb is the optional annotated JPEG; nil unless DiffOpts.WantThumb.
 	Thumb []byte `json:"-"`
 }
@@ -107,6 +107,10 @@ const (
 	scrollShiftMinFrac = 0.6
 	// scrollProbeMaxShift caps the vertical offsets the scroll probe tries.
 	scrollProbeMaxShift = 64
+	// maxDecodePixels caps the W·H of an input image before the full decode
+	// runs — a defence against decode-bomb captures (a tiny file declaring
+	// huge dimensions). ~30 MP is far above any real browser screenshot.
+	maxDecodePixels = 30_000_000
 )
 
 // diffImages is the entry point: decode `before`/`after` (JPEG or PNG, via
@@ -121,6 +125,15 @@ func diffImages(before, after []byte, opts DiffOpts) (DiffResult, error) {
 	}
 	if opts.ThumbWidth <= 0 {
 		opts.ThumbWidth = diffThumbWidthDefault
+	}
+
+	// Read the dimensions cheaply first and reject decode-bomb inputs before
+	// committing to a full decode (which would allocate W·H·4 bytes).
+	if err := checkDecodeSize(before, "before"); err != nil {
+		return DiffResult{}, err
+	}
+	if err := checkDecodeSize(after, "after"); err != nil {
+		return DiffResult{}, err
 	}
 
 	bImg, _, err := image.Decode(bytes.NewReader(before))
@@ -211,6 +224,21 @@ func diffImages(before, after []byte, opts DiffOpts) (DiffResult, error) {
 		}
 	}
 	return res, nil
+}
+
+// checkDecodeSize reads only the image header (image.DecodeConfig) and
+// rejects an input whose pixel count exceeds maxDecodePixels, so a hostile
+// or malformed capture cannot force a multi-GB allocation in the full decode.
+func checkDecodeSize(data []byte, label string) error {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("decode %s image header: %w", label, err)
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > maxDecodePixels {
+		return fmt.Errorf("%s image too large: %d×%d exceeds the %d-pixel cap",
+			label, cfg.Width, cfg.Height, maxDecodePixels)
+	}
+	return nil
 }
 
 // alignSizes scales the narrower image up to the wider one's width (reusing
@@ -435,20 +463,28 @@ func detectRegions(mask []bool, w, h int) []DiffRegion {
 		}
 	}
 
+	// Drop noise-sized boxes BEFORE merging so the O(n²) merge only ever
+	// sees signal-bearing components — a field of sub-floor specks would
+	// otherwise blow up the merge input.
+	total := float64(w * h)
+	areaFloor := total * regionAreaFloorFrac
+	signal := boxes[:0]
+	for _, b := range boxes {
+		if float64(b.Dx()*b.Dy()) >= areaFloor {
+			signal = append(signal, b)
+		}
+	}
+	boxes = signal
+
 	// Merge boxes that overlap or sit within regionMergeGap·ds pixels.
 	gap := regionMergeGap * ds
 	boxes = mergeBoxes(boxes, gap)
 
-	// Drop noise-sized and caret-shaped boxes, build regions.
-	total := float64(w * h)
-	areaFloor := total * regionAreaFloorFrac
+	// Build regions, dropping caret-shaped boxes.
 	regions := make([]DiffRegion, 0, len(boxes))
 	for _, b := range boxes {
 		bw, bh := b.Dx(), b.Dy()
 		area := float64(bw * bh)
-		if area < areaFloor {
-			continue
-		}
 		// Caret heuristic: a thin, tall, on/off stripe is a text caret.
 		if bw <= caretMaxWidth && bh > 0 && float64(bh)/float64(max(bw, 1)) >= caretMinAspect {
 			continue

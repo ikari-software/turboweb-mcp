@@ -645,7 +645,8 @@ describe('dispatch', () => {
     const result = await api.dispatch('inspect_form', { formSelector: '#f' });
     // No navigation occurred — only the content-script inspect ran.
     expect(chrome.tabs.update).not.toHaveBeenCalled();
-    expect(result).toEqual({ form: { action: '' }, fields: [] });
+    // navTimedOut is folded in: false when no navigation was issued.
+    expect(result).toEqual({ form: { action: '' }, fields: [], navTimedOut: false });
   });
 
   it('inspect_form — with url already on target, skips navigation', async () => {

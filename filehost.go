@@ -54,12 +54,17 @@ type fileGrant struct {
 type fileHostServer struct {
 	mu      sync.Mutex
 	grants  map[string]*fileGrant
-	port    int // the port actually bound (fixed or ephemeral)
+	port    int   // the port actually bound (fixed or ephemeral)
+	err     error // startup error from ensureFileHost's sync.Once, if any
 	started bool
+	// done signals sweepLoop to exit; closed by stop(). It exists so the
+	// sweeper goroutine does not leak across test binaries that share the
+	// process-global fileHostOnce.
+	done chan struct{}
 }
 
 var (
-	fileHost     = &fileHostServer{grants: map[string]*fileGrant{}}
+	fileHost     = &fileHostServer{grants: map[string]*fileGrant{}, done: make(chan struct{})}
 	fileHostOnce sync.Once
 )
 
@@ -68,14 +73,16 @@ var (
 // every drag_drop_file invocation. Returns the port that was bound, or an
 // error if even the ephemeral fallback fails.
 func ensureFileHost() (int, error) {
-	var startErr error
 	fileHostOnce.Do(func() {
 		// Try the fixed port first, then fall back to an OS-assigned one.
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", fileHostPort))
 		if err != nil {
 			ln, err = net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
-				startErr = fmt.Errorf("file host: cannot bind loopback: %w", err)
+				// Persist the failure on the struct so every later
+				// (no-op Do) caller sees the real error instead of a
+				// silent (0, nil).
+				fileHost.err = fmt.Errorf("file host: cannot bind loopback: %w", err)
 				return
 			}
 		}
@@ -96,8 +103,10 @@ func ensureFileHost() (int, error) {
 		go fileHost.sweepLoop()
 		logger.Printf("file host listening on 127.0.0.1:%d", fileHost.port)
 	})
-	if startErr != nil {
-		return 0, startErr
+	// Check the persisted error OUTSIDE the Do so a failed first bind is
+	// reported on every subsequent call, not just the first.
+	if fileHost.err != nil {
+		return 0, fileHost.err
 	}
 	return fileHost.port, nil
 }
@@ -163,20 +172,26 @@ func (h *fileHostServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file grant expired or already used", http.StatusGone)
 		return
 	}
-	// Mark used before serving so a concurrent or repeat request for the
-	// same token loses the race and 410s. The spent grant is kept as a
-	// tombstone (not deleted) until expiry so a retry gets an honest
-	// "already used" 410 rather than an ambiguous 404; the sweeper drops
-	// it once expiresAt passes.
-	grant.used = true
 	h.mu.Unlock()
 
+	// Open the file BEFORE consuming the token: if the file is unreadable
+	// at GET time the caller gets a retriable 500 with the grant intact,
+	// rather than burning the single-use token on a doomed request.
 	f, err := os.Open(grant.absPath)
 	if err != nil {
 		http.Error(w, "file no longer readable", http.StatusInternalServerError)
 		return
 	}
 	defer f.Close()
+
+	// Mark used now that the open succeeded, so a concurrent or repeat
+	// request for the same token loses the race and 410s. The spent grant
+	// is kept as a tombstone (not deleted) until expiry so a retry gets an
+	// honest "already used" 410 rather than an ambiguous 404; the sweeper
+	// drops it once expiresAt passes.
+	h.mu.Lock()
+	grant.used = true
+	h.mu.Unlock()
 	info, err := f.Stat()
 	if err != nil {
 		http.Error(w, "file no longer readable", http.StatusInternalServerError)
@@ -190,18 +205,31 @@ func (h *fileHostServer) handleFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // sweepLoop drops expired grants every TTL interval so a token that is
-// minted but never fetched does not linger in the map.
+// minted but never fetched does not linger in the map. It exits when the
+// done channel is closed (see stop).
 func (h *fileHostServer) sweepLoop() {
 	ticker := time.NewTicker(fileGrantTTL)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		h.mu.Lock()
-		for token, g := range h.grants {
-			if g.used || now.After(g.expiresAt) {
-				delete(h.grants, token)
+	for {
+		select {
+		case <-h.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			h.mu.Lock()
+			for token, g := range h.grants {
+				if g.used || now.After(g.expiresAt) {
+					delete(h.grants, token)
+				}
 			}
+			h.mu.Unlock()
 		}
-		h.mu.Unlock()
 	}
+}
+
+// stop closes the done channel so the sweepLoop goroutine exits. It is
+// idempotent-safe only once; intended for test teardown so the sweeper does
+// not leak across test binaries that share the process-global fileHostOnce.
+func (h *fileHostServer) stop() {
+	close(h.done)
 }

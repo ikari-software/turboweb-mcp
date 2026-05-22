@@ -15,7 +15,7 @@ import (
 
 // screenshot_diff_handler_test.go — exercises handleScreenshotDiff end to
 // end against the mock browser transport: mint → verify, the JSON return
-// shape, the expired-baseline error, and the include_thumb image block (§8).
+// shape, the expired-baseline error, and the includeThumb image block (§8).
 
 // b64PNG renders a solid w×h image and returns base64 PNG — what the mock
 // `screenshot` action hands back.
@@ -83,7 +83,7 @@ func TestScreenshotDiff_MintBaseline(t *testing.T) {
 	}, func() {
 		res := callDiff(t, map[string]any{"intent": "mark before"})
 		var out struct {
-			BaselineID string `json:"baseline_id"`
+			BaselineID string `json:"baselineId"`
 			Minted     bool   `json:"minted"`
 		}
 		if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
@@ -125,13 +125,13 @@ func TestScreenshotDiff_VerifyChanged(t *testing.T) {
 		}
 		return map[string]any{"result": map[string]any{}}
 	}, func() {
-		res := callDiff(t, map[string]any{"intent": "verify", "baseline_id": id})
+		res := callDiff(t, map[string]any{"intent": "verify", "baselineId": id})
 		var out struct {
 			Changed     bool          `json:"changed"`
 			Score       float64       `json:"score"`
-			RegionCount int           `json:"region_count"`
+			RegionCount int           `json:"regionCount"`
 			Regions     []DiffRegion  `json:"regions"`
-			BaselineID  string        `json:"baseline_id"`
+			BaselineID  string        `json:"baselineId"`
 			DOM         struct{ Mutations int `json:"mutations"` } `json:"dom"`
 		}
 		if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
@@ -146,8 +146,11 @@ func TestScreenshotDiff_VerifyChanged(t *testing.T) {
 		if out.DOM.Mutations != 3 {
 			t.Errorf("verify: dom.mutations = %d, want 3", out.DOM.Mutations)
 		}
-		if out.BaselineID == "" || out.BaselineID == id {
-			t.Errorf("verify: expected a fresh baseline_id, got %q", out.BaselineID)
+		// A verify call against an explicit baselineId reuses that baseline
+		// verbatim — it must NOT mint a fresh one, or 16 chained diffs would
+		// evict the caller's own baseline from the FIFO cache.
+		if out.BaselineID != id {
+			t.Errorf("verify: baselineId = %q, want the caller's baseline %q reused", out.BaselineID, id)
 		}
 		if out.Score >= 1.0 {
 			t.Errorf("verify: score = %v, want < 1.0", out.Score)
@@ -175,10 +178,10 @@ func TestScreenshotDiff_FastPathSkipsCapture(t *testing.T) {
 		}
 		return map[string]any{"result": map[string]any{}}
 	}, func() {
-		res := callDiff(t, map[string]any{"intent": "verify no-op", "baseline_id": id})
+		res := callDiff(t, map[string]any{"intent": "verify no-op", "baselineId": id})
 		var out struct {
 			Changed      bool `json:"changed"`
-			PixelSkipped bool `json:"pixel_skipped"`
+			PixelSkipped bool `json:"pixelSkipped"`
 		}
 		if err := json.Unmarshal([]byte(extractText(t, res)), &out); err != nil {
 			t.Fatalf("parse: %v", err)
@@ -198,9 +201,9 @@ func TestScreenshotDiff_FastPathSkipsCapture(t *testing.T) {
 func TestScreenshotDiff_ExpiredBaseline(t *testing.T) {
 	theBaselineCache = newBaselineCache()
 	withMockBrowser(t, echoHandler, func() {
-		res := callDiff(t, map[string]any{"intent": "verify", "baseline_id": "b_notreal"})
+		res := callDiff(t, map[string]any{"intent": "verify", "baselineId": "b_notreal"})
 		if !res.IsError {
-			t.Error("expired/unknown baseline_id should return a tool error")
+			t.Error("expired/unknown baselineId should return a tool error")
 		}
 	})
 }
@@ -221,16 +224,16 @@ func TestScreenshotDiff_IncludeThumb(t *testing.T) {
 		}
 		return map[string]any{"result": map[string]any{}}
 	}, func() {
-		res := callDiff(t, map[string]any{"intent": "verify", "baseline_id": id, "include_thumb": true})
+		res := callDiff(t, map[string]any{"intent": "verify", "baselineId": id, "includeThumb": true})
 		if len(res.Content) != 2 {
-			t.Fatalf("include_thumb: %d content blocks, want 2 (text + image)", len(res.Content))
+			t.Fatalf("includeThumb: %d content blocks, want 2 (text + image)", len(res.Content))
 		}
 		// Second block must be an image.
 		b, _ := json.Marshal(res.Content[1])
 		var block struct{ Type string }
 		json.Unmarshal(b, &block)
 		if block.Type != "image" {
-			t.Errorf("include_thumb: second block type = %q, want image", block.Type)
+			t.Errorf("includeThumb: second block type = %q, want image", block.Type)
 		}
 	})
 }

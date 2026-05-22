@@ -1275,17 +1275,37 @@ describe('drag_drop_file', () => {
     document.body.innerHTML = '<div id="inert"></div>';
     const zone = document.querySelector('#inert');
     mockRect(zone, { x: 0, y: 0, width: 50, height: 50 });
-    // No listener mutates the DOM → MutationObserver sees nothing.
+    // No listener: nothing mutates the DOM and dragover/drop are never
+    // preventDefault()-ed, so BOTH honest-failure warnings fire.
     const result = await api.__turboPerformDrop(zone, new Blob(['x']), 'x.txt', 'text/plain');
     expect(result.warnings.length).toBeGreaterThan(0);
-    expect(result.warnings[0]).toMatch(/did not appear to react/);
+    expect(result.warnings.some((w) => /did not appear to react/.test(w))).toBe(true);
+    expect(result.warnings.some((w) => /did not preventDefault/.test(w))).toBe(true);
   });
 
-  it('does not warn when the handler mutates the DOM', async () => {
+  it('warns when the drop zone does not preventDefault the drop', async () => {
     document.body.innerHTML = '<div id="live"></div>';
     const zone = document.querySelector('#live');
     mockRect(zone, { x: 0, y: 0, width: 50, height: 50 });
+    // The handler mutates the DOM (so the reaction probe is satisfied) but
+    // never calls preventDefault() — the page did NOT accept the drop, so
+    // the defaultPrevented warning must still fire.
     zone.addEventListener('drop', () => {
+      zone.appendChild(document.createElement('span')); // observable mutation
+    });
+    const result = await api.__turboPerformDrop(zone, new Blob(['x']), 'x.txt', 'text/plain');
+    expect(result.warnings.some((w) => /did not preventDefault/.test(w))).toBe(true);
+  });
+
+  it('does not warn when the drop zone accepts the drop', async () => {
+    document.body.innerHTML = '<div id="ok"></div>';
+    const zone = document.querySelector('#ok');
+    mockRect(zone, { x: 0, y: 0, width: 50, height: 50 });
+    // A real drop zone preventDefault()s dragover/drop AND mutates the DOM —
+    // it accepted the payload, so neither honest-failure warning fires.
+    zone.addEventListener('dragover', (ev) => ev.preventDefault());
+    zone.addEventListener('drop', (ev) => {
+      ev.preventDefault();
       zone.appendChild(document.createElement('span')); // observable mutation
     });
     const result = await api.__turboPerformDrop(zone, new Blob(['x']), 'x.txt', 'text/plain');
@@ -1293,14 +1313,14 @@ describe('drag_drop_file', () => {
   });
 
   // --- dragDropFile: pre-flight validation & fetch ---
-  it('rejects a missing target_selector', async () => {
+  it('rejects a missing selector', async () => {
     await expect(api.dragDropFile({ fileName: 'a.txt' }))
-      .rejects.toThrow(/target_selector is required/);
+      .rejects.toThrow(/selector is required/);
   });
 
   it('rejects when no element matches the selector', async () => {
     await expect(api.dragDropFile({
-      target_selector: '.nope', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+      selector: '.nope', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
     })).rejects.toThrow(/No element matches selector/);
   });
 
@@ -1308,7 +1328,7 @@ describe('drag_drop_file', () => {
     document.body.innerHTML = '<div class="hidden"></div>';
     mockRect(document.querySelector('.hidden'), { x: 0, y: 0, width: 0, height: 0 });
     await expect(api.dragDropFile({
-      target_selector: '.hidden', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+      selector: '.hidden', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
     })).rejects.toThrow(/zero-size bounding box/);
   });
 
@@ -1317,7 +1337,7 @@ describe('drag_drop_file', () => {
     mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
     globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
     await expect(api.dragDropFile({
-      target_selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+      selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
     })).rejects.toThrow(/could not reach the loopback file host/);
   });
 
@@ -1326,7 +1346,7 @@ describe('drag_drop_file', () => {
     mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 410 });
     await expect(api.dragDropFile({
-      target_selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+      selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
     })).rejects.toThrow(/HTTP 410/);
   });
 
@@ -1339,7 +1359,7 @@ describe('drag_drop_file', () => {
     // runDropInPage will not resolve here (the injected MAIN-world <script>
     // does not execute under jsdom), so just assert the fetch URL shape.
     api.dragDropFile({
-      target_selector: '.dz', fileName: 'a.txt', mimeType: 'text/plain',
+      selector: '.dz', fileName: 'a.txt', mimeType: 'text/plain',
       size: 5, fileHostPort: 18399, fileToken: 'abc123',
     }).catch(() => {});
     await new Promise(r => setTimeout(r, 0));
@@ -1354,7 +1374,7 @@ describe('drag_drop_file', () => {
     });
     const sendResponse = vi.fn();
     const r = messageHandler(
-      { action: 'drag_drop_file', params: { target_selector: '.dz', fileName: 'a.txt', fileHostPort: 1, fileToken: 't' } },
+      { action: 'drag_drop_file', params: { selector: '.dz', fileName: 'a.txt', fileHostPort: 1, fileToken: 't' } },
       null, sendResponse,
     );
     expect(r).toBe(true); // async handler

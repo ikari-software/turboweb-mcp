@@ -460,6 +460,59 @@ func TestSend_ConcurrentRequests(t *testing.T) {
 	}
 }
 
+// TestSend_SharedParamMapNoRace guards the sendDirect param-clone: a caller
+// may pass ONE map[string]any across several concurrent send() calls (the
+// describe fan-out does exactly this). sendDirect must clone params before
+// writing _clientLabel/_clientHue into it — otherwise concurrent writes to
+// the shared map are a data race. This test fires send() from many
+// goroutines with the SAME map pointer, so `go test -race` fires if the
+// clone in sendDirect is ever removed.
+func TestSend_SharedParamMapNoRace(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+
+	srv, wsURL := startTestWSServer(t)
+	defer srv.Close()
+
+	conn := connectMockBrowser(t, wsURL, func(msg map[string]any) map[string]any {
+		return map[string]any{"result": "ok"}
+	})
+	defer conn.Close()
+
+	if len(getOpenBrowsers()) == 0 {
+		t.Fatal("no browsers connected")
+	}
+
+	// One shared map, passed by pointer to every concurrent send().
+	shared := map[string]any{"key": "value"}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, err := send("test_action", shared, 5000)
+			errs[idx] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("request %d: %v", i, err)
+		}
+	}
+	// The shared map must be untouched — sendDirect mutates only its clone.
+	if _, ok := shared["_clientHue"]; ok {
+		t.Error("send() wrote _clientHue into the caller's shared map — clone missing")
+	}
+	if _, ok := shared["_clientLabel"]; ok {
+		t.Error("send() wrote _clientLabel into the caller's shared map — clone missing")
+	}
+}
+
 // --- Relay tests ---
 
 // startTestDaemon creates a test server that serves both browser and relay endpoints.

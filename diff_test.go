@@ -146,12 +146,15 @@ func TestDiffImages_CaretDropped(t *testing.T) {
 	before := solidPNG(t, 600, 400, bg)
 	after := patchedPNG(t, 600, 400, bg, caret, color.RGBA{A: 255})
 
-	res, err := diffImages(after, before, DiffOpts{})
+	res, err := diffImages(before, after, DiffOpts{})
 	if err != nil {
 		t.Fatalf("diffImages: %v", err)
 	}
 	if res.RegionCount != 0 {
 		t.Errorf("caret stripe produced %d regions, want 0: %+v", res.RegionCount, res.Regions)
+	}
+	if res.Changed {
+		t.Errorf("a blinking caret must not register as a change")
 	}
 }
 
@@ -265,6 +268,52 @@ func TestGridLabel(t *testing.T) {
 		if got := gridLabel(c.x, c.y, 1280, 800); got != c.want {
 			t.Errorf("gridLabel(%d,%d) = %q, want %q", c.x, c.y, got, c.want)
 		}
+	}
+}
+
+func TestDiffImages_ScrollDetected(t *testing.T) {
+	// A page scroll shifts every row vertically. Build a before image with
+	// distinct per-row content (a vertical gradient), then shift every row
+	// down ~20px for the after image — detectScroll should catch the global
+	// vertical shift and set Scrolled.
+	const w, h, shift = 200, 400, 20
+	before := image.NewRGBA(image.Rect(0, 0, w, h))
+	after := image.NewRGBA(image.Rect(0, 0, w, h))
+	// rowColor gives each row a distinct colour so a vertical shift is
+	// unambiguous to the cross-correlation probe.
+	rowColor := func(y int) color.RGBA {
+		return color.RGBA{R: uint8(y % 256), G: uint8((y * 3) % 256), B: 128, A: 255}
+	}
+	for y := 0; y < h; y++ {
+		bc := rowColor(y)
+		// after.row(y) carries the colour of before.row(y-shift): the whole
+		// page has scrolled down by `shift` pixels.
+		ac := rowColor(((y - shift) + h) % h)
+		for x := 0; x < w; x++ {
+			before.SetRGBA(x, y, bc)
+			after.SetRGBA(x, y, ac)
+		}
+	}
+
+	res, err := diffImages(encodePNG(t, before), encodePNG(t, after), DiffOpts{})
+	if err != nil {
+		t.Fatalf("diffImages: %v", err)
+	}
+	if !res.Scrolled {
+		t.Errorf("a global vertical shift must set Scrolled=true (score %v)", res.Score)
+	}
+
+	// Negative case: a small localized change must NOT be mistaken for a
+	// scroll — only a handful of rows differ, so detectScroll stays quiet.
+	bg := color.RGBA{R: 240, G: 240, B: 240, A: 255}
+	tallEnough := patchedPNG(t, w, h, bg, image.Rect(60, 150, 140, 210), color.RGBA{A: 255})
+	solid := solidPNG(t, w, h, bg)
+	res2, err := diffImages(solid, tallEnough, DiffOpts{})
+	if err != nil {
+		t.Fatalf("diffImages (localized): %v", err)
+	}
+	if res2.Scrolled {
+		t.Errorf("a small localized change must not set Scrolled")
 	}
 }
 
