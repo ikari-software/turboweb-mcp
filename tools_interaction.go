@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -118,6 +120,175 @@ func registerInteractionTools(s *server.MCPServer) {
 		),
 		bidiOrFallback("cdp_scroll", handleBiDiScroll),
 	)
+
+	// --- prepare_for_user_click (honest handoff to the watching human) ---
+	addTool(s,
+		mcp.NewTool("prepare_for_user_click",
+			mcp.WithDescription(
+				"Hand the final click off to the human watching the tab. Scrolls the "+
+					"target into view, draws a persistent highlight + handoff banner, "+
+					"takes a screenshot, and returns status:\"awaiting_user\" immediately "+
+					"— it does NOT click and does NOT block.\n\n"+
+					"Use this ONLY when human action is genuinely required:\n"+
+					"  • auth — an OAuth consent, a 2FA prompt, a password re-entry.\n"+
+					"  • confirmation — an irreversible button (\"Delete account\", "+
+					"\"Transfer funds\", \"Submit order\") a human should own.\n"+
+					"  • os_dialog — a native file picker / print dialog / permission "+
+					"bubble outside the page DOM.\n"+
+					"  • untrusted_input — a control that rejects synthetic input even "+
+					"via cdp_* (some payment widgets, captchas, DRM players).\n\n"+
+					"This is NOT a fallback for a selector you couldn't resolve or a "+
+					"`click` that was merely awkward — use `click` / `cdp_click` for "+
+					"those. After calling this tool, end your turn and wait for the "+
+					"human to act; then verify the page state before continuing.\n\n"+
+					"Provide ONE of selector / x,y. `hint` is required — it is the "+
+					"instruction the human reads.",
+			),
+			mcp.WithString("selector", mcp.Description("CSS selector of the control the human should click. Resolved to a bounding box and scrolled into view. Preferred.")),
+			mcp.WithNumber("x", mcp.Description("X viewport coordinate, for canvas / non-DOM targets where a selector doesn't apply (lower fidelity — no scroll-into-view)")),
+			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (pair with x)")),
+			mcp.WithString("hint", mcp.Required(), mcp.Description("Required. Human-readable instruction shown in the on-page banner: what to click and why the agent is handing off. e.g. \"Click Allow to grant calendar access — I can't approve OAuth scopes for you.\"")),
+			mcp.WithString("reason", mcp.Description("Why the handoff is necessary. One of: auth, confirmation, os_dialog, untrusted_input, other. Drives banner copy/iconography; defaults to other."),
+				mcp.Enum("auth", "confirmation", "os_dialog", "untrusted_input", "other")),
+			mcp.WithString("label", mcp.Description("Short name for the control (\"the Allow button\"), used as the banner's bold first line when the full hint is too long for it.")),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		handlePrepareForUserClick,
+	)
+}
+
+// validHandoffReasons gates the `reason` enum server-side so a bogus value
+// can't reach the extension's banner copy switch.
+var validHandoffReasons = map[string]bool{
+	"auth": true, "confirmation": true, "os_dialog": true,
+	"untrusted_input": true, "other": true,
+}
+
+// handlePrepareForUserClick runs the instruct-and-stop handoff. It forwards
+// the target + hint to the extension (which scrolls into view, paints the
+// persistent highlight + banner, and reports the resolved bbox), captures a
+// screenshot so the agent sees what the human sees, and assembles a
+// multi-content result (image + JSON). It returns immediately — the human is
+// expected to act after the agent's turn ends, so this never blocks on them.
+func handlePrepareForUserClick(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+
+	hint := toString(args["hint"])
+	if hint == "" {
+		return mcp.NewToolResultError("prepare_for_user_click: hint is required — it is the instruction the human reads"), nil
+	}
+	sel := toString(args["selector"])
+	_, hasX := args["x"]
+	if sel == "" && !hasX {
+		return mcp.NewToolResultError("prepare_for_user_click: provide either selector or x,y coordinates"), nil
+	}
+
+	reason := toString(args["reason"])
+	if reason == "" {
+		reason = "other"
+	} else if !validHandoffReasons[reason] {
+		return mcp.NewToolResultError(fmt.Sprintf("prepare_for_user_click: unknown reason %q (want auth, confirmation, os_dialog, untrusted_input, or other)", reason)), nil
+	}
+
+	// Forward the handoff to the extension. The content script does the
+	// scroll-into-view, paints the banner + persistent highlight, and reports
+	// back the resolved bbox plus inViewport/occluded flags.
+	params := rawArgs(args)
+	params["reason"] = reason
+	raw, err := send("prepare_for_user_click", params)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	var prep struct {
+		Found        bool            `json:"found"`
+		Selector     string          `json:"selector"`
+		Label        string          `json:"label"`
+		Bbox         json.RawMessage `json:"bbox"`
+		InViewport   bool            `json:"inViewport"`
+		Occluded     bool            `json:"occluded"`
+		Ambiguous    bool            `json:"ambiguous"`
+		OverlayShown bool            `json:"overlayShown"`
+		ReasonDetail string          `json:"reasonDetail"`
+	}
+	if err := json.Unmarshal(raw, &prep); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("prepare_for_user_click: failed to parse prepare result: %v", err)), nil
+	}
+
+	target := map[string]any{"found": prep.Found}
+	if prep.Selector != "" {
+		target["selector"] = prep.Selector
+	}
+	if prep.Label != "" {
+		target["label"] = prep.Label
+	}
+	if len(prep.Bbox) > 0 {
+		target["bbox"] = prep.Bbox
+	}
+	if prep.Ambiguous {
+		target["ambiguous"] = true
+	}
+
+	// Target not found: the handoff did NOT happen. Return text-only (no
+	// image) so the agent knows to re-resolve the target and retry.
+	if !prep.Found {
+		out := map[string]any{
+			"handoff": false,
+			"status":  "target_not_found",
+			"target":  target,
+			"reason":  reason,
+		}
+		if prep.ReasonDetail != "" {
+			out["reasonDetail"] = prep.ReasonDetail
+		}
+		return textResult(out)
+	}
+
+	target["inViewport"] = prep.InViewport
+	target["occluded"] = prep.Occluded
+
+	out := map[string]any{
+		"handoff":         true,
+		"status":          "awaiting_user",
+		"target":          target,
+		"instruction":     hint,
+		"reason":          reason,
+		"overlayShown":    prep.OverlayShown,
+		"screenshotTaken": false,
+	}
+
+	// Capture a screenshot AFTER the banner + highlight have painted so the
+	// returned image shows the human exactly what the page now looks like.
+	// Reuse the extension `screenshot` action (same path handleScreenshot's
+	// fallback uses); on failure we still hand off — the instruction text is
+	// the real contract, the image is an aid.
+	shotArgs := map[string]any{}
+	if tid, ok := args["tabId"]; ok {
+		shotArgs["tabId"] = tid
+	}
+	shotRaw, shotErr := send("screenshot", shotArgs)
+	if shotErr == nil {
+		var shot struct {
+			Base64   string `json:"base64"`
+			MimeType string `json:"mimeType"`
+		}
+		if json.Unmarshal(shotRaw, &shot) == nil && shot.Base64 != "" {
+			out["screenshotTaken"] = true
+			mime := shot.MimeType
+			if mime == "" {
+				mime = "image/jpeg"
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					mcp.NewImageContent(shot.Base64, mime),
+					mcp.NewTextContent(toJSON(out)),
+				},
+			}, nil
+		}
+	}
+
+	// No screenshot — still an honest handoff, text-only.
+	return textResult(out)
 }
 
 // passThrough creates a handler that forwards the action and all args to the extension.

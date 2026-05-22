@@ -53,6 +53,7 @@ beforeAll(() => {
     'setInputFiles', 'interceptFileChooser',
     'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
     'executeJsMain', 'adaptScript', 'dispatch',
+    'PAGE_ACTIONS_THAT_GATE_ON_CURSOR',
   ].join(', ');
 
   code += `\nglobalThis.__bgAPI = { ${fns} };`;
@@ -669,8 +670,51 @@ describe('dispatch', () => {
     expect(chrome.tabs.update).toHaveBeenCalledWith(4, { url: 'https://app.example/new' });
   });
 
+  it('prepare_for_user_click — routes to content script and broadcasts a handoff', async () => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (cb) cb({ found: true, label: 'Allow', bbox: { x: 1, y: 2, width: 3, height: 4 } });
+    });
+
+    const result = await api.dispatch('prepare_for_user_click', {
+      tabId: 1, selector: '#allow', hint: 'Click Allow', label: 'Allow', reason: 'auth',
+    });
+    expect(result).toMatchObject({ found: true, label: 'Allow' });
+  });
+
+  it('prepare_for_user_click — emits a handoff broadcast row for the popup', async () => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (cb) cb({ found: true, label: 'Allow' });
+    });
+    // Register a popup port so broadcast() has a sink to post to.
+    const port = {
+      name: 'popup', postMessage: vi.fn(),
+      onDisconnect: __makeEvent(), onMessage: __makeEvent(),
+    };
+    chrome.runtime.onConnect._fire(port);
+
+    await api.dispatch('prepare_for_user_click', {
+      tabId: 7, selector: '#allow', hint: 'Click Allow', reason: 'auth',
+    });
+
+    const handoffMsg = port.postMessage.mock.calls
+      .map(c => c[0]).find(m => m.type === 'handoff');
+    expect(handoffMsg).toBeDefined();
+    expect(handoffMsg).toMatchObject({ active: true, tabId: 7, hint: 'Click Allow' });
+  });
+
   it('throws for unknown action', async () => {
     await expect(api.dispatch('nonexistent', {})).rejects.toThrow('Unknown action');
+  });
+});
+
+// ============================================================
+// prepare_for_user_click — gating
+// ============================================================
+describe('prepare_for_user_click gating', () => {
+  it('is in the cursor-gate set so the screenshot catches the banner', () => {
+    expect(api.PAGE_ACTIONS_THAT_GATE_ON_CURSOR.has('prepare_for_user_click')).toBe(true);
   });
 });
 

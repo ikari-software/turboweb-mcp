@@ -549,6 +549,91 @@
     return out;
   }
 
+  // --- Prepare for user click (honest handoff) ---
+  // Resolves the target, scrolls it into view, paints the persistent
+  // handoff banner + highlight, and reports the post-scroll bbox plus
+  // inViewport/occluded flags so the Go layer can put them in the result.
+  // This tool deliberately does NOT click — the human does.
+  async function prepareForUserClick({ selector, x, y, hint, label, reason }) {
+    let el = null;
+    let ambiguous = false;
+
+    if (selector) {
+      const matches = document.querySelectorAll(selector);
+      if (matches.length > 1) ambiguous = true;
+      el = matches[0] || null;
+      if (el) {
+        // The overlay only renders in the top frame; a selector inside an
+        // iframe can't be resolved here. Fall through to coordinate mode.
+        const probe = el.getBoundingClientRect();
+        if (probe.width < 1 && probe.height < 1 && el.tagName === 'IFRAME') {
+          return { found: false, reasonDetail: 'target_in_iframe' };
+        }
+      }
+    }
+
+    let bbox, cx, cy;
+    if (el) {
+      // Scroll the control to centre, then wait for the smooth scroll to
+      // settle (scrollend where supported, capped by a timeout) before
+      // re-reading the rect — the banner anchors to the settled position.
+      el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+      await new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        window.addEventListener('scrollend', finish, { once: true });
+        setTimeout(finish, 600);
+      });
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 && r.height < 1) {
+        return { found: false, reasonDetail: 'zero_size_bbox' };
+      }
+      bbox = { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
+      cx = r.left + r.width / 2;
+      cy = r.top + r.height / 2;
+    } else if (typeof x === 'number' && typeof y === 'number') {
+      // Coordinate mode: lower fidelity — no element to scroll, anchor, or
+      // attach a click listener to. Draw a small fixed box around the point.
+      cx = x; cy = y;
+      bbox = { x: Math.round(x - 16), y: Math.round(y - 16), width: 32, height: 32 };
+    } else {
+      return { found: false, reasonDetail: 'no_target' };
+    }
+
+    // inViewport: the rect sits fully within the visible viewport.
+    const inViewport = bbox.x >= 0 && bbox.y >= 0 &&
+      bbox.x + bbox.width <= window.innerWidth &&
+      bbox.y + bbox.height <= window.innerHeight;
+    // occluded: something other than the target (or a descendant) covers
+    // its centre point. Only meaningful in element mode.
+    let occluded = false;
+    if (el) {
+      const hit = document.elementFromPoint(cx, cy);
+      occluded = !!hit && hit !== el && !el.contains(hit) && !hit.contains(el);
+    }
+
+    // Await the overlay so the response resolves only once the cursor +
+    // banner have landed — the background gates the follow-up screenshot
+    // on this so the captured image shows the settled handoff.
+    await overlay.showHandoff({
+      el,
+      x: cx, y: cy,
+      bbox: { left: bbox.x, top: bbox.y, width: bbox.width, height: bbox.height },
+      hint, label,
+    });
+
+    return {
+      found: true,
+      selector: selector || undefined,
+      label: label || undefined,
+      bbox,
+      inViewport,
+      occluded,
+      ambiguous,
+      overlayShown: window.top === window,
+    };
+  }
+
   // --- Type text ---
   function typeText({ selector, text, clear = false, pressEnter = false }) {
     const el = selector ? document.querySelector(selector) : document.activeElement;
@@ -1186,6 +1271,16 @@
     let anchorRAF = 0;
     let anchorAbort = null;
 
+    // Handoff state: a persistent banner + highlight set up by
+    // prepare_for_user_click. Unlike toasts these don't auto-expire; they
+    // clear on an explicit handoff_clear or the safety ceiling below.
+    // handoffState = { banner, highlight, target, clickAbort, expireTimer }.
+    let handoffState = null;
+    // Generous ceiling — human response time is the expected variable, so
+    // this is much longer than the toast's 60s. Stops a forgotten handoff
+    // from leaving the page permanently overlaid.
+    const HANDOFF_MAX_LIFE_MS = 10 * 60 * 1000;
+
     function clearAnchor() {
       if (anchorAbort) { anchorAbort.abort(); anchorAbort = null; }
       if (anchorRAF) { cancelAnimationFrame(anchorRAF); anchorRAF = 0; }
@@ -1347,6 +1442,60 @@
         @keyframes highlightFade {
           0%   { opacity: 0.95; }
           100% { opacity: 0; }
+        }
+        /* Persistent handoff highlight: no one-shot fade. Instead a slow 2s
+           breathing pulse so the box stays alive and eye-catching while the
+           human reads the banner — a static border the eye filters out. */
+        .highlight.persist {
+          animation: highlightBreathe 2000ms ease-in-out infinite;
+        }
+        @keyframes highlightBreathe {
+          0%, 100% { opacity: 0.95; box-shadow: 0 0 14px var(--highlight-glow, rgba(227, 179, 65, 0.65)); }
+          50%      { opacity: 0.6;  box-shadow: 0 0 28px var(--highlight-glow, rgba(227, 179, 65, 0.65)); }
+        }
+        /* Handoff banner: a sticky top-centre callout carrying the agent's
+           instruction. Unlike toasts it does NOT auto-fade and does NOT go
+           transparent on mouse-proximity — it is an instruction the human
+           must act on, not narration. Cleared only by an explicit
+           handoff_clear or the safety ceiling. */
+        .handoff-banner {
+          position: fixed;
+          top: 56px; left: 50%;
+          transform: translateX(-50%) translateY(-16px);
+          display: flex; align-items: flex-start; gap: 10px;
+          padding: 12px 16px;
+          max-width: 460px;
+          background: rgba(13, 17, 23, 0.96);
+          border: 1px solid hsl(var(--client-hue, 40), 78%, 52%);
+          border-left-width: 4px;
+          border-radius: 8px;
+          color: #c9d1d9;
+          font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5), 0 0 16px hsla(var(--client-hue, 40), 78%, 52%, 0.25);
+          backdrop-filter: blur(8px);
+          opacity: 0;
+          transition: opacity 200ms ease, transform 280ms cubic-bezier(0.2, 0.7, 0.3, 1);
+          pointer-events: none;
+          z-index: 20;
+        }
+        .handoff-banner.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+        .handoff-banner .hb-mark {
+          flex-shrink: 0;
+          width: 26px; height: 26px;
+          display: flex; align-items: center; justify-content: center;
+          background: hsl(var(--client-hue, 40), 78%, 48%);
+          border-radius: 50%;
+          border: 1.5px solid #0d1117;
+        }
+        .handoff-banner .hb-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .handoff-banner .hb-title {
+          font-weight: 700; font-size: 13px; color: #f0f3f6;
+        }
+        .handoff-banner .hb-hint { color: #c9d1d9; }
+        .handoff-banner .hb-hint strong { color: #f0f3f6; }
+        .handoff-banner .hb-caption {
+          margin-top: 4px;
+          font-size: 11px; color: hsl(var(--client-hue, 40), 60%, 62%);
         }
         /* Loupe: a glowing ring shown over each match during read-only
            scans (find_text, extract_text). Communicates "the agent looked
@@ -1660,6 +1809,14 @@
           return { ring: '#a371f7', fill: 'rgba(163, 113, 247, 0.5)',  glow: 'rgba(163, 113, 247, 0.55)' };
         case '__error':
           return { ring: '#f85149', fill: 'rgba(248, 81, 73, 0.55)',   glow: 'rgba(248, 81, 73, 0.6)'   };
+        case 'prepare_for_user_click':
+          // Calm, attention-holding amber-gold — distinct from the orange
+          // click flash and the red error. The handoff is a "look here and
+          // act" beat, not a "the agent did something" beat.
+          return { ring: '#e3b341', fill: 'rgba(227, 179, 65, 0.5)',    glow: 'rgba(227, 179, 65, 0.65)' };
+        case '__handoff_success':
+          // Green success pulse fired when the human actually clicks.
+          return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.55)',    glow: 'rgba(63, 185, 80, 0.6)'   };
         default: // click, cdp_click, anything unknown
           return { ring: '#d29922', fill: 'rgba(210, 153, 34, 0.55)',  glow: 'rgba(210, 153, 34, 0.6)'  };
       }
@@ -1689,12 +1846,15 @@
       setTimeout(() => ring.remove(), 700);
     }
 
-    function highlightRect(rect, palette) {
+    // When persist is set, highlightRect keeps the box alive (slow breathing
+    // pulse instead of a one-shot fade) and returns the node so the caller
+    // can reposition/remove it — used by the handoff banner.
+    function highlightRect(rect, palette, opts = {}) {
       ensure();
-      if (!root || !rect) return;
+      if (!root || !rect) return null;
       const p = palette || actionPalette('click');
       const h = document.createElement('div');
-      h.className = 'highlight';
+      h.className = opts.persist ? 'highlight persist' : 'highlight';
       h.style.left = (rect.left - 2) + 'px';
       h.style.top = (rect.top - 2) + 'px';
       h.style.width = (rect.width + 4) + 'px';
@@ -1702,7 +1862,110 @@
       h.style.setProperty('--highlight-color', p.ring);
       h.style.setProperty('--highlight-glow', p.glow);
       root.appendChild(h);
-      setTimeout(() => h.remove(), 1200);
+      if (!opts.persist) setTimeout(() => h.remove(), 1200);
+      return h;
+    }
+
+    // showHandoff renders the persistent handoff overlay: cursor lands on
+    // the target, a ripple beat fires, a breathing highlight box appears,
+    // and the instruction banner slides in top-centre. The banner + box are
+    // glued to the target so they track page scroll/reflow. Returns once the
+    // cursor has arrived so the caller can gate the follow-up screenshot.
+    //
+    // hint/label are agent-supplied — escaped via escapeHtml, same as toast
+    // text. A new handoff replaces any active one (newest-wins, §6).
+    async function showHandoff({ el, x, y, bbox, hint, label, who }) {
+      ensure();
+      if (!root) return;
+      clearHandoff();
+      // Newest-wins: hard-remove any banner/highlight still mid-exit from a
+      // just-replaced handoff so two instructions never stack on one page.
+      root.querySelectorAll('.handoff-banner, .highlight.persist').forEach(n => n.remove());
+
+      await moveCursorTo(x, y);
+      flashAt(x, y, actionPalette('prepare_for_user_click'));
+
+      const highlight = bbox
+        ? highlightRect(bbox, actionPalette('prepare_for_user_click'), { persist: true })
+        : null;
+      if (el) setAnchor(el, x, y);
+      cameraFlash();
+
+      const banner = document.createElement('div');
+      banner.className = 'handoff-banner';
+      const title = label || 'Your turn';
+      // who identifies which agent is handing off (essential in multi-agent
+      // sessions). Fall back to the live badge name set by showStart.
+      const agent = who || badge?.querySelector('.agent-name')?.textContent || '';
+      const caption = agent && agent !== 'Agent'
+        ? `TurboWeb · ${escapeHtml(agent)} is waiting for you`
+        : 'TurboWeb · the agent is waiting for you';
+      banner.innerHTML = `
+        <span class="hb-mark">${robotSVG(15, '#0d1117')}</span>
+        <span class="hb-body">
+          <span class="hb-title">${escapeHtml(title)}</span>
+          <span class="hb-hint">${escapeHtml(hint || '')}</span>
+          <span class="hb-caption">${caption}</span>
+        </span>
+      `;
+      root.appendChild(banner);
+      // Trigger the enter transition next frame (initial offset paints
+      // first). Awaited so the handoff is fully "entered" before we return.
+      await new Promise((resolve) => requestAnimationFrame(() => {
+        banner.classList.add('on');
+        resolve();
+      }));
+
+      const state = { banner, highlight, el, x, y, expireTimer: 0, trackAbort: null };
+
+      // Track scroll/reflow: keep the highlight glued to the live element.
+      if (el && highlight) {
+        state.trackAbort = new AbortController();
+        const reposition = () => {
+          if (!el.isConnected) { clearHandoff(); return; }
+          const r = el.getBoundingClientRect();
+          highlight.style.left = (r.left - 2) + 'px';
+          highlight.style.top = (r.top - 2) + 'px';
+          highlight.style.width = (r.width + 4) + 'px';
+          highlight.style.height = (r.height + 4) + 'px';
+        };
+        window.addEventListener('scroll', reposition, { capture: true, passive: true, signal: state.trackAbort.signal });
+        window.addEventListener('resize', reposition, { passive: true, signal: state.trackAbort.signal });
+      }
+
+      // Opportunistic detection: a one-shot listener on the target so a
+      // human click clears the handoff with a green success pulse. Pure
+      // observation — the agent never depends on it.
+      if (el) {
+        state.clickAbort = new AbortController();
+        el.addEventListener('click', () => {
+          const r = el.getBoundingClientRect();
+          flashAt(r.left + r.width / 2, r.top + r.height / 2, actionPalette('__handoff_success'));
+          clearHandoff();
+        }, { once: true, signal: state.clickAbort.signal });
+      }
+
+      // Safety ceiling so a never-acted-on handoff doesn't overlay forever.
+      state.expireTimer = setTimeout(() => clearHandoff(), HANDOFF_MAX_LIFE_MS);
+
+      handoffState = state;
+    }
+
+    // clearHandoff tears down the persistent banner + highlight and detaches
+    // every listener/timer. Safe to call when no handoff is active.
+    function clearHandoff() {
+      const s = handoffState;
+      if (!s) return;
+      handoffState = null;
+      if (s.expireTimer) clearTimeout(s.expireTimer);
+      if (s.trackAbort) s.trackAbort.abort();
+      if (s.clickAbort) s.clickAbort.abort();
+      if (s.highlight) s.highlight.remove();
+      if (s.banner) {
+        s.banner.classList.remove('on');
+        setTimeout(() => s.banner.remove(), 240);
+      }
+      clearAnchor();
     }
 
     // Loupe: a circular spotlight shown over each match in read-only
@@ -2177,7 +2440,7 @@
       }, IDLE_FADE_MS);
     }
 
-    return { showStart, showResult, showError };
+    return { showStart, showResult, showError, showHandoff, clearHandoff };
   })();
 
   // --- DOM-mutation signal (the cheap complement to the pixel diff) ------
@@ -2406,6 +2669,17 @@
         sendResponse({ ok: true });
         return;
       }
+      if (payload.kind === 'handoff') {
+        // Persistent handoff: resolve only once the cursor + banner have
+        // landed so the background can gate the follow-up screenshot.
+        overlay.showHandoff(payload).then(() => sendResponse({ ok: true }));
+        return true; // async response
+      }
+      if (payload.kind === 'handoff_clear') {
+        overlay.clearHandoff();
+        sendResponse({ ok: true });
+        return;
+      }
       sendResponse({ ok: true });
       return;
     }
@@ -2419,6 +2693,7 @@
       inspect_form: (p) => inspectForm(p),
       page_capabilities: () => pageCapabilities(),
       click: (p) => clickElement(p),
+      prepare_for_user_click: (p) => prepareForUserClick(p),
       type_text: (p) => typeText(p),
       scroll: (p) => scrollPage(p),
       get_html: (p) => getHTML(p),

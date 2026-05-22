@@ -280,10 +280,14 @@ function connect() {
     // call. Race the overlay against a fixed ceiling that's a touch
     // longer than the cursor's worst-case duration.
     if (PAGE_ACTIONS_THAT_GATE_ON_CURSOR.has(msg.action)) {
+      // prepare_for_user_click also smooth-scrolls the target into view and
+      // paints the handoff banner, which settles slower than a bare cursor
+      // hop — give it a longer ceiling so the screenshot catches the overlay.
+      const ceilingMs = msg.action === 'prepare_for_user_click' ? 1500 : 900;
       try {
         await Promise.race([
           overlayPromise,
-          new Promise(resolve => setTimeout(resolve, 900)),
+          new Promise(resolve => setTimeout(resolve, ceilingMs)),
         ]);
       } catch {}
     }
@@ -446,6 +450,10 @@ async function notifyOverlay(tabId, payload) {
 const PAGE_ACTIONS_THAT_GATE_ON_CURSOR = new Set([
   'click', 'cdp_click', 'type_text', 'cdp_type', 'inspect', 'set_input_files',
   'drag_drop_file',
+  // prepare_for_user_click scrolls the target into view and paints a banner
+  // before the Go layer screenshots the page — gate so the screenshot
+  // captures the settled overlay.
+  'prepare_for_user_click',
 ]);
 
 // --- Legacy CDP real-input fallback helpers (used by tests and extension fallback mode) ---
@@ -974,6 +982,27 @@ async function dispatch(action, params) {
         csp_allows_eval: cspAllowsEval,
         ...page,
       };
+    }
+
+    case 'prepare_for_user_click': {
+      // Honest handoff: the content script scrolls the target into view,
+      // paints the persistent highlight + handoff banner, and reports the
+      // resolved bbox. The Go layer then screenshots the settled page.
+      const tid = await resolveTab(params.tabId);
+      const result = await toContent(tid, 'prepare_for_user_click', {
+        selector: params.selector, x: params.x, y: params.y,
+        hint: params.hint, label: params.label, reason: params.reason,
+      });
+      // Pin a sticky "waiting for you" row in the popup, in the agent's hue,
+      // so a human watching the popup (not the page) still sees the handoff.
+      broadcast({
+        type: 'handoff',
+        active: !!result?.found,
+        tabId: tid,
+        label: result?.label || params.label || '',
+        hint: params.hint || '',
+      });
+      return result;
     }
 
     case 'click':

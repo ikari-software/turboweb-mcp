@@ -30,6 +30,19 @@ beforeAll(() => {
     messageHandler = fn;
   });
 
+  // The overlay attaches a CLOSED shadow root, which tests can't read into.
+  // Force `open` AND stash the overlay's host element so handoff-overlay
+  // tests can reach the rendered nodes even after the global beforeEach
+  // wipes document.body (which detaches the host from the DOM but leaves
+  // content.js's module-level `root` ref — and the shadow tree — intact).
+  // Production stays closed; this is a test-only relaxation.
+  const realAttachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) {
+    const sr = realAttachShadow.call(this, { ...init, mode: 'open' });
+    if (this.id === '__turbo_overlay_host') globalThis.__overlayHost = this;
+    return sr;
+  };
+
   // Load content.js — inject a globalThis export line before the closing IIFE
   const filePath = path.resolve(__dirname, '../content.js');
   let code = fs.readFileSync(filePath, 'utf8');
@@ -39,7 +52,7 @@ beforeAll(() => {
     'getInteractiveMap', 'queryElements', 'inspectForm', 'pageCapabilities',
     'clickElement', 'typeText',
     'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
-    'executeJS', 'injectScript',
+    'executeJS', 'injectScript', 'prepareForUserClick', 'overlay',
     'dragDropFile', 'runDropInPage', '__turboPerformDrop',
     'domMutationsMark', 'domMutationsSince', 'screenshotDiffMeta',
   ].join(', ');
@@ -525,6 +538,170 @@ describe('clickElement', () => {
 
   it('throws without selector or coordinates', () => {
     expect(() => api.clickElement({})).toThrow('Provide selector or x,y');
+  });
+});
+
+// ============================================================
+// prepareForUserClick() — honest handoff
+// ============================================================
+describe('prepareForUserClick', () => {
+  beforeEach(() => {
+    // jsdom's scrollIntoView is a no-op stub — spy on it to assert calls.
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  it('resolves a selector, scrolls into view, and reports the bbox', async () => {
+    document.body.innerHTML = '<button id="allow">Allow</button>';
+    const btn = document.getElementById('allow');
+    mockRect(btn, { x: 100, y: 200, width: 96, height: 40 });
+    document.elementFromPoint = vi.fn(() => btn);
+
+    const result = await api.prepareForUserClick({
+      selector: '#allow', hint: 'Click Allow to grant access', label: 'Allow',
+    });
+
+    expect(btn.scrollIntoView).toHaveBeenCalledWith(
+      expect.objectContaining({ block: 'center', behavior: 'smooth' }),
+    );
+    expect(result.found).toBe(true);
+    expect(result.bbox).toEqual({ x: 100, y: 200, width: 96, height: 40 });
+    expect(result.label).toBe('Allow');
+  });
+
+  it('computes inViewport=false for an off-screen target', async () => {
+    document.body.innerHTML = '<button id="b">x</button>';
+    const btn = document.getElementById('b');
+    // Beyond the 1280x800 viewport.
+    mockRect(btn, { x: 100, y: 2000, width: 80, height: 30 });
+    document.elementFromPoint = vi.fn(() => btn);
+
+    const result = await api.prepareForUserClick({ selector: '#b', hint: 'scroll down' });
+    expect(result.found).toBe(true);
+    expect(result.inViewport).toBe(false);
+  });
+
+  it('computes occluded=true when another element covers the centre', async () => {
+    document.body.innerHTML = '<button id="b">x</button><div id="cover">cookie banner</div>';
+    const btn = document.getElementById('b');
+    const cover = document.getElementById('cover');
+    mockRect(btn, { x: 0, y: 0, width: 100, height: 40 });
+    document.elementFromPoint = vi.fn(() => cover); // something else on top
+
+    const result = await api.prepareForUserClick({ selector: '#b', hint: 'dismiss the banner first' });
+    expect(result.occluded).toBe(true);
+  });
+
+  it('flags ambiguous when the selector matches multiple elements', async () => {
+    document.body.innerHTML = '<button class="x">a</button><button class="x">b</button>';
+    document.querySelectorAll('.x').forEach(el => mockRect(el, { x: 0, y: 0, width: 50, height: 20 }));
+    document.elementFromPoint = vi.fn(() => document.querySelector('.x'));
+
+    const result = await api.prepareForUserClick({ selector: '.x', hint: 'click the first' });
+    expect(result.ambiguous).toBe(true);
+    expect(result.found).toBe(true);
+  });
+
+  it('returns found=false for a missing selector', async () => {
+    const result = await api.prepareForUserClick({ selector: '#nope', hint: 'click it' });
+    expect(result.found).toBe(false);
+    expect(result.reasonDetail).toBe('no_target');
+  });
+
+  it('supports coordinate mode (no element to scroll)', async () => {
+    const result = await api.prepareForUserClick({ x: 300, y: 450, hint: 'click the captcha' });
+    expect(result.found).toBe(true);
+    expect(result.bbox.width).toBe(32);
+    expect(result.occluded).toBe(false);
+  });
+});
+
+// ============================================================
+// handoff overlay — persistent banner + highlight
+// ============================================================
+describe('handoff overlay', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    // The overlay host is a singleton created lazily by ensure() — don't
+    // remove it between tests (the module-level `root` ref would go stale).
+    // clearHandoff() inside showHandoff already tears down prior handoffs.
+    api.overlay.clearHandoff();
+  });
+
+  // Reach the overlay's shadow tree via the stashed host (see beforeAll) —
+  // robust even after document.body has been wiped between tests.
+  function overlayRoot() {
+    const host = globalThis.__overlayHost;
+    return host && host.shadowRoot ? host.shadowRoot : null;
+  }
+
+  it('handoff event renders a banner and a persistent highlight', async () => {
+    document.body.innerHTML = '<button id="b">Go</button>';
+    const btn = document.getElementById('b');
+    mockRect(btn, { x: 10, y: 20, width: 96, height: 40 });
+
+    await api.overlay.showHandoff({
+      el: btn, x: 58, y: 40,
+      bbox: { left: 10, top: 20, width: 96, height: 40 },
+      hint: 'Click Allow to continue', label: 'Allow',
+    });
+
+    const sr = overlayRoot();
+    expect(sr).not.toBeNull();
+    const banner = sr.querySelector('.handoff-banner');
+    expect(banner).not.toBeNull();
+    expect(banner.querySelector('.hb-title').textContent).toBe('Allow');
+    expect(banner.querySelector('.hb-hint').textContent).toBe('Click Allow to continue');
+    // Persistent highlight: the breathing variant, with NO fade timer.
+    const hl = sr.querySelector('.highlight.persist');
+    expect(hl).not.toBeNull();
+  });
+
+  it('escapes a hint containing HTML / script', async () => {
+    await api.overlay.showHandoff({
+      el: null, x: 100, y: 100,
+      bbox: { left: 90, top: 90, width: 20, height: 20 },
+      hint: '<script>alert(1)</script>', label: '<b>x</b>',
+    });
+    const sr = overlayRoot();
+    const hint = sr.querySelector('.handoff-banner .hb-hint');
+    // The raw text is preserved; no live <script> node injected.
+    expect(hint.textContent).toBe('<script>alert(1)</script>');
+    expect(hint.querySelector('script')).toBeNull();
+    expect(sr.querySelector('.handoff-banner .hb-title').querySelector('b')).toBeNull();
+  });
+
+  it('handoff_clear removes the banner and highlight', async () => {
+    await api.overlay.showHandoff({
+      el: null, x: 50, y: 50,
+      bbox: { left: 40, top: 40, width: 20, height: 20 },
+      hint: 'do the thing',
+    });
+    let sr = overlayRoot();
+    expect(sr.querySelector('.handoff-banner')).not.toBeNull();
+
+    api.overlay.clearHandoff();
+    // The highlight is removed synchronously; the banner removal is on a
+    // short exit timer, but it loses its `.on` class immediately.
+    expect(sr.querySelector('.highlight.persist')).toBeNull();
+    expect(sr.querySelector('.handoff-banner.on')).toBeNull();
+  });
+
+  it('a second handoff replaces the first (newest-wins)', async () => {
+    await api.overlay.showHandoff({
+      el: null, x: 50, y: 50,
+      bbox: { left: 40, top: 40, width: 20, height: 20 },
+      hint: 'first handoff', label: 'First',
+    });
+    await api.overlay.showHandoff({
+      el: null, x: 200, y: 200,
+      bbox: { left: 190, top: 190, width: 20, height: 20 },
+      hint: 'second handoff', label: 'Second',
+    });
+    const sr = overlayRoot();
+    const banners = sr.querySelectorAll('.handoff-banner.on');
+    // Only the newest banner is active; the replaced one is exiting.
+    expect(banners.length).toBe(1);
+    expect(banners[0].querySelector('.hb-title').textContent).toBe('Second');
   });
 });
 
