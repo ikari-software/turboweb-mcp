@@ -26,6 +26,11 @@ port.onMessage.addListener((msg) => {
   }
 });
 
+// Show the version straight from the manifest so the header never drifts
+// from the actual build — manifest.json is the single source the build
+// derives every artifact from.
+document.getElementById('ver').textContent = 'MCP v' + chrome.runtime.getManifest().version;
+
 // Request current state
 port.postMessage({ type: 'getState' });
 

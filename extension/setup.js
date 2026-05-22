@@ -28,6 +28,7 @@ globalThis.chrome = {
       name: 'popup',
     })),
     sendMessage: vi.fn(),
+    getManifest: vi.fn(() => ({ version: '0.0.0-test' })),
     onMessage: makeEvent(),
     onConnect: makeEvent(),
     get lastError() { return chrome.runtime._lastError; },
