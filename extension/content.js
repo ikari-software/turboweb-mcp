@@ -907,6 +907,211 @@
     });
   }
 
+  // --- Drag-and-drop file upload (non-CDP fallback) ----------------------
+  // Synthesizes a real File and drops it on a drop zone, or assigns it to an
+  // <input type=file>. This never touches chrome.debugger, so it works when
+  // CDP is unavailable and in Firefox.
+  //
+  // The file bytes are fetched here, in the content script's isolated world,
+  // which is NOT subject to the page's CSP connect-src — so a strict page
+  // CSP can't block the loopback fetch. The Blob is then handed to a
+  // MAIN-world script (via injectScript / window.postMessage) so that the
+  // File/DataTransfer/DragEvent are constructed in the page's own JS realm —
+  // framework `instanceof File` checks and React's nativeEvent reads then
+  // pass. See design/drag_drop_file.md §3.3.
+  async function dragDropFile({ target_selector, fileName, mimeType, size, fileToken, fileHostPort }) {
+    if (!target_selector) throw new Error('target_selector is required');
+
+    // 1. Resolve + sanity-check the target before fetching anything.
+    const target = document.querySelector(target_selector);
+    if (!target) throw new Error('No element matches selector: ' + target_selector);
+    const rect = target.getBoundingClientRect();
+    if (rect.width < 1 && rect.height < 1) {
+      throw new Error('Target element has a zero-size bounding box: ' + target_selector +
+        ' (an invisible element is almost certainly the wrong drop target)');
+    }
+
+    // 2. Fetch the file bytes from the loopback file host. Done here in the
+    //    isolated world so the page's CSP can't block it. A single-use
+    //    token gates the endpoint server-side.
+    const url = 'http://127.0.0.1:' + fileHostPort + '/file/' + fileToken;
+    let blob;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error('file host returned HTTP ' + resp.status +
+          (resp.status === 410 ? ' (file grant expired or already used — retry)' : ''));
+      }
+      blob = await resp.blob();
+    } catch (e) {
+      // Distinguish an unreachable host from an HTTP error.
+      const m = String(e?.message || e);
+      if (/HTTP \d/.test(m)) throw new Error('drag_drop_file: ' + m);
+      throw new Error('drag_drop_file: could not reach the loopback file host at ' + url + ' (' + m + ')');
+    }
+
+    // 3. Hand the Blob to a MAIN-world script which builds the File +
+    //    DataTransfer in the page realm and dispatches the drop. Blobs
+    //    structured-clone cleanly across the postMessage realm boundary.
+    return await runDropInPage(target_selector, blob, fileName, mimeType, size);
+  }
+
+  // __turboPerformDrop is the page-realm drop logic. It is defined here so
+  // it can be unit-tested directly, but it is NEVER called from the content
+  // script's isolated world at runtime — runDropInPage serializes it with
+  // .toString() and injects it into the page's MAIN world, so that the
+  // File/DataTransfer/DragEvent it builds belong to the page's own JS realm.
+  // Framework `instanceof File` checks and React's nativeEvent reads then
+  // pass. See design/drag_drop_file.md §3.3.
+  //
+  // It auto-detects an <input type=file> target (assigns input.files — the
+  // CDP-free §3.5 path) versus a drop zone (dispatches the real browser
+  // dragenter/dragover/drop choreography), and returns which path ran plus a
+  // best-effort "did the widget react" observation.
+  async function __turboPerformDrop(el, blob, fileName, mimeType) {
+    const file = new File([blob], fileName || 'file', {
+      type: mimeType || 'application/octet-stream',
+      lastModified: Date.now(),
+    });
+    const dt = new DataTransfer();
+    dt.items.add(file); // dt.files is now [file]
+
+    // Best-effort reaction probe: watch the target subtree for any DOM
+    // mutation in a short window. Uploads are often async/silent, so a
+    // lack of reaction is a warning, never a hard failure.
+    let reacted = false;
+    const obs = new MutationObserver(() => { reacted = true; });
+    obs.observe(el, { childList: true, subtree: true, attributes: true, characterData: true });
+
+    const result = { warnings: [] };
+
+    if (el instanceof HTMLInputElement && el.type === 'file') {
+      // CDP-free path for a real <input type=file>: assign the FileList.
+      // The resulting change event has isTrusted:false — see the warning.
+      el.files = dt.files;
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      result.method = 'input.files';
+      result.events_dispatched = ['input', 'change'];
+    } else {
+      // Drop-zone path: dispatch the real browser drag choreography at the
+      // element's centre. dragenter -> dragover -> drop mirrors a human
+      // drop; many libraries arm `drop` only after dragenter/dragover.
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const fire = (kind) => {
+        const ev = new DragEvent(kind, {
+          bubbles: true, cancelable: true, composed: true,
+          clientX: cx, clientY: cy,
+        });
+        // The DragEvent ctor's dataTransfer option is not honored by every
+        // engine; override the getter so the DataTransfer is always present.
+        Object.defineProperty(ev, 'dataTransfer', { value: dt });
+        el.dispatchEvent(ev);
+        return ev;
+      };
+      fire('dragenter');
+      fire('dragover');
+      fire('drop');
+      result.method = 'drop';
+      result.events_dispatched = ['dragenter', 'dragover', 'drop'];
+    }
+
+    // Give async handlers a beat, then report whether anything moved. A
+    // non-reaction is surfaced as a warning so the agent can fall back to
+    // set_input_files (CDP, trusted) — we never falsely report success.
+    await new Promise((res) => setTimeout(res, 1500));
+    obs.disconnect();
+    if (!reacted) {
+      result.warnings.push('drop zone handler did not appear to react within 1500ms — ' +
+        'the page may gate on event.isTrusted; consider set_input_files (CDP, trusted)');
+    }
+    return result;
+  }
+
+  // runDropInPage injects a MAIN-world <script> that runs __turboPerformDrop,
+  // transfers the Blob to it via window.postMessage, and resolves with the
+  // script's result.
+  //
+  // The isolated world and the MAIN world have *separate* `window` objects,
+  // so the Blob cannot be passed via a shared global — it is sent over
+  // window.postMessage (structured clone, which Blobs survive cleanly), and
+  // the injected script awaits its arrival before dispatching. The script is
+  // injected first (it installs its Blob listener synchronously) and the
+  // Blob posted after, so the message is guaranteed to be heard.
+  function runDropInPage(selector, blob, fileName, mimeType, size) {
+    return new Promise((resolve, reject) => {
+      const cbName  = '__turbo_drop_cb_'  + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+      const blobMsg = '__turbo_drop_blob_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
+      let settled = false;
+      function listener(event) {
+        if (event.data?.type !== cbName) return;
+        window.removeEventListener('message', listener);
+        if (settled) return;
+        settled = true;
+        if (event.data.error) { reject(new Error(event.data.error)); return; }
+        const r = event.data.result || {};
+        if (r.error) { reject(new Error(r.error)); return; }
+        resolve({
+          dropped: true,
+          target_selector: selector,
+          method: r.method,
+          file: { name: fileName, size, type: mimeType },
+          events_dispatched: r.events_dispatched || [],
+          warnings: r.warnings || [],
+        });
+      }
+      window.addEventListener('message', listener);
+
+      // Inject the MAIN-world script. It carries __turboPerformDrop verbatim
+      // (via .toString()), awaits the Blob postMessage, re-queries the target
+      // immediately before dispatch (so a vanished element errors cleanly),
+      // and posts the result back.
+      const script = document.createElement('script');
+      script.textContent = `
+        (async function() {
+          const performDrop = ${__turboPerformDrop.toString()};
+          try {
+            const blob = await new Promise((res, rej) => {
+              const to = setTimeout(() => {
+                window.removeEventListener('message', h);
+                rej(new Error('file blob was not delivered to the page'));
+              }, 5000);
+              function h(ev) {
+                if (ev.data && ev.data.type === ${JSON.stringify(blobMsg)}) {
+                  clearTimeout(to);
+                  window.removeEventListener('message', h);
+                  res(ev.data.blob);
+                }
+              }
+              window.addEventListener('message', h);
+            });
+            const el = document.querySelector(${JSON.stringify(selector)});
+            if (!el) throw new Error('target element disappeared before drop: ' + ${JSON.stringify(selector)});
+            const __r = await performDrop(el, blob, ${JSON.stringify(fileName || 'file')}, ${JSON.stringify(mimeType || 'application/octet-stream')});
+            window.postMessage({ type: ${JSON.stringify(cbName)}, result: __r }, '*');
+          } catch (e) {
+            window.postMessage({ type: ${JSON.stringify(cbName)}, error: e.message }, '*');
+          }
+        })();
+      `;
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+
+      // Hand the Blob to the page realm (structured clone).
+      window.postMessage({ type: blobMsg, blob }, '*');
+
+      // Timeout guard: blob-wait + 1.5s reaction window + injection overhead.
+      setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', listener);
+        reject(new Error('drag_drop_file: drop script timed out (8s)'));
+      }, 8000);
+    });
+  }
+
   // --- Agent overlay -----------------------------------------------------
   // A tiny on-page UI (Shadow-DOM-isolated) that shows the human user what
   // the agent is doing in real time: a persistent badge in the top-right
@@ -1447,6 +1652,7 @@
     function actionPalette(action) {
       switch (action) {
         case 'type_text': case 'cdp_type': case 'cdp_key': case 'set_input_files':
+        case 'drag_drop_file':
           return { ring: '#58a6ff', fill: 'rgba(88, 166, 255, 0.55)',  glow: 'rgba(88, 166, 255, 0.55)' };
         case 'scroll': case 'cdp_scroll':
           return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.45)',   glow: 'rgba(63, 185, 80, 0.5)'   };
@@ -1771,6 +1977,17 @@
           return { el, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'inspect' };
         }
       }
+      if (action === 'drag_drop_file' && params.target_selector) {
+        // Animate the cursor to the drop zone itself — it is the visible
+        // thing the user would drag a file onto.
+        const el = document.querySelector(params.target_selector);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 || r.height > 0) {
+            return { el, x: r.left + r.width / 2, y: r.top + r.height / 2, bbox: r, type: 'type' };
+          }
+        }
+      }
       if (action === 'set_input_files' && params.selector) {
         // The real <input type=file> is usually hidden — useless as a
         // cursor target. Prefer the visible thing the user actually clicks:
@@ -2013,6 +2230,7 @@
       get_page_structure: (p) => getPageStructure(p),
       execute_js_isolated: (p) => executeJS(p),
       inject_script: (p) => injectScript(p),
+      drag_drop_file: (p) => dragDropFile(p),
     };
 
     const handler = handlers[msg.action];

@@ -79,13 +79,18 @@ function build() {
       // (plain ws://, no TLS) can't answer — the connection just fails.
       // Declaring our own extension_pages CSP replaces that default (no
       // implicit upgrade) and whitelists the loopback endpoints the
-      // background script actually talks to: the daemon WS (:18321) and
-      // the native screenshot resizer (:18322). Chrome doesn't upgrade
-      // loopback, so this is Firefox-only.
+      // background script actually talks to: the daemon WS (:18321), the
+      // native screenshot resizer (:18322), and the drag_drop_file loopback
+      // file host (:18323). Chrome doesn't upgrade loopback, so this is
+      // Firefox-only. Note this CSP governs extension *pages*, not content
+      // scripts — drag_drop_file fetches the file from the content script's
+      // isolated world, which this does not gate; the :18323 entry is for
+      // defence-in-depth/consistency with the resizer convention.
       m.content_security_policy = {
         extension_pages:
           "script-src 'self'; object-src 'self'; " +
-          "connect-src 'self' ws://127.0.0.1:18321 ws://localhost:18321 http://127.0.0.1:18322",
+          "connect-src 'self' ws://127.0.0.1:18321 ws://localhost:18321 " +
+          "http://127.0.0.1:18322 http://127.0.0.1:18323",
       };
     }
 

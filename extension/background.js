@@ -445,6 +445,7 @@ async function notifyOverlay(tabId, payload) {
 // still fire-and-forget to keep them snappy.
 const PAGE_ACTIONS_THAT_GATE_ON_CURSOR = new Set([
   'click', 'cdp_click', 'type_text', 'cdp_type', 'inspect', 'set_input_files',
+  'drag_drop_file',
 ]);
 
 // --- Legacy CDP real-input fallback helpers (used by tests and extension fallback mode) ---
@@ -914,6 +915,20 @@ async function dispatch(action, params) {
 
     case 'intercept_file_chooser':
       return await interceptFileChooser(params.tabId, !!params.enable, params.files);
+
+    // Non-CDP file upload: routed to the content script (NOT chrome.debugger),
+    // so it works when CDP is unavailable and in Firefox. The bytes are
+    // fetched by the content script from the loopback file host; only the
+    // token + metadata travel through here.
+    case 'drag_drop_file':
+      return await toContent(params.tabId, 'drag_drop_file', {
+        target_selector: params.target_selector,
+        fileName: params.fileName,
+        mimeType: params.mimeType,
+        size: params.size,
+        fileToken: params.fileToken,
+        fileHostPort: params.fileHostPort,
+      });
 
     // --- Content-script commands ---
     case 'extract_text':

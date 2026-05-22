@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,61 @@ func registerFileTools(s *server.MCPServer) {
 		),
 		handleInterceptFileChooser,
 	)
+
+	addTool(s,
+		mcp.NewTool("drag_drop_file",
+			mcp.WithDescription(
+				"Upload a local file by simulating a drag-and-drop onto a drop zone — a non-CDP fallback "+
+					"for set_input_files. Use when the upload widget is a drag-drop zone with no <input type=file>, "+
+					"or when CDP/chrome.debugger is unavailable (DevTools open, Firefox, policy-blocked). "+
+					"Synthesizes a real File in the page and dispatches dragenter/dragover/drop carrying it. "+
+					"If the target resolves to an <input type=file> it assigns input.files directly instead. "+
+					"Some frameworks that gate on event.isTrusted will ignore this — prefer set_input_files when a file input exists.",
+			),
+			mcp.WithString("target_selector", mcp.Required(),
+				mcp.Description("CSS selector of the drop zone (the element with the drop handler, a wrapper, or an <input type=file>)")),
+			mcp.WithString("local_file_path", mcp.Required(),
+				mcp.Description("Absolute filesystem path on the MCP server host. Relative paths are rejected; ~/foo is expanded; symlinks are resolved.")),
+			mcp.WithString("mime_type",
+				mcp.Description("Override the File MIME type. Default: sniffed from the file extension, falling back to application/octet-stream.")),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		handleDragDropFile,
+	)
+}
+
+// resolveHostPath expands ~, requires an absolute path, resolves symlinks via
+// realpath, and verifies the result is an existing regular file. It returns
+// the canonical absolute path and its os.FileInfo. This is the per-entry
+// validation shared by resolveHostPaths (set_input_files) and the
+// single-path drag_drop_file tool. `label` is used in error messages so the
+// caller can identify which argument failed.
+func resolveHostPath(s, label string) (string, os.FileInfo, error) {
+	if s == "" {
+		return "", nil, fmt.Errorf("%s: not a non-empty string", label)
+	}
+	if s == "~" || strings.HasPrefix(s, "~/") {
+		home, _ := os.UserHomeDir()
+		if home == "" {
+			return "", nil, fmt.Errorf("%s: cannot expand ~ (no $HOME)", label)
+		}
+		s = filepath.Join(home, strings.TrimPrefix(s, "~"))
+	}
+	if !filepath.IsAbs(s) {
+		return "", nil, fmt.Errorf("%s: must be an absolute path on the MCP server host (got %q)", label, s)
+	}
+	resolved, err := filepath.EvalSymlinks(s)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %v", label, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %v", label, err)
+	}
+	if info.IsDir() {
+		return "", nil, fmt.Errorf("%s: %s is a directory, not a file", label, resolved)
+	}
+	return resolved, info, nil
 }
 
 // resolveHostPaths expands ~, requires absolute paths, resolves symlinks via
@@ -62,36 +118,32 @@ func resolveHostPaths(raw any) ([]string, error) {
 	if len(arr) == 0 {
 		return nil, fmt.Errorf("files: empty array")
 	}
-	home, _ := os.UserHomeDir()
 	out := make([]string, 0, len(arr))
 	for i, v := range arr {
 		s, ok := v.(string)
-		if !ok || s == "" {
+		if !ok {
 			return nil, fmt.Errorf("files[%d]: not a non-empty string", i)
 		}
-		if s == "~" || strings.HasPrefix(s, "~/") {
-			if home == "" {
-				return nil, fmt.Errorf("files[%d]: cannot expand ~ (no $HOME)", i)
-			}
-			s = filepath.Join(home, strings.TrimPrefix(s, "~"))
-		}
-		if !filepath.IsAbs(s) {
-			return nil, fmt.Errorf("files[%d]: must be an absolute path on the MCP server host (got %q)", i, s)
-		}
-		resolved, err := filepath.EvalSymlinks(s)
+		resolved, _, err := resolveHostPath(s, fmt.Sprintf("files[%d]", i))
 		if err != nil {
-			return nil, fmt.Errorf("files[%d]: %v", i, err)
-		}
-		info, err := os.Stat(resolved)
-		if err != nil {
-			return nil, fmt.Errorf("files[%d]: %v", i, err)
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("files[%d]: %s is a directory, not a file", i, resolved)
+			return nil, err
 		}
 		out = append(out, resolved)
 	}
 	return out, nil
+}
+
+// sniffMimeType resolves the MIME type for a drag_drop_file upload: an
+// explicit override wins, otherwise it is guessed from the file extension,
+// falling back to application/octet-stream when the extension is unknown.
+func sniffMimeType(override, path string) string {
+	if override != "" {
+		return override
+	}
+	if t := mime.TypeByExtension(filepath.Ext(path)); t != "" {
+		return t
+	}
+	return "application/octet-stream"
 }
 
 func handleSetInputFiles(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -129,6 +181,57 @@ func handleInterceptFileChooser(_ context.Context, req mcp.CallToolRequest) (*mc
 		delete(fwd, "files")
 	}
 	raw, err := send("intercept_file_chooser", fwd)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(raw)), nil
+}
+
+// handleDragDropFile is the non-CDP file-upload fallback. It validates the
+// host path, mints a single-use token on the loopback file host, and lets
+// the content script fetch the bytes and synthesize a drop. The file bytes
+// never traverse the WS channel — only the small token/metadata JSON does.
+func handleDragDropFile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	selector := toString(args["target_selector"])
+	if selector == "" {
+		return mcp.NewToolResultError("target_selector is required"), nil
+	}
+	rawPath := toString(args["local_file_path"])
+	absPath, info, err := resolveHostPath(rawPath, "local_file_path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	mimeType := sniffMimeType(toString(args["mime_type"]), absPath)
+
+	// Start the loopback file host (idempotent) and mint a one-shot grant
+	// for exactly this file.
+	port, err := ensureFileHost()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	token, err := fileHost.mintFileGrant(absPath, filepath.Base(absPath), mimeType, info.Size())
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// Forward only metadata + the token; the bytes flow over the separate
+	// :18323 HTTP channel. The token is intentionally not echoed into any
+	// intent/log surface.
+	fwd := rawArgs(args)
+	delete(fwd, "local_file_path")
+	delete(fwd, "mime_type")
+	fwd["target_selector"] = selector
+	fwd["fileName"] = filepath.Base(absPath)
+	fwd["mimeType"] = mimeType
+	fwd["size"] = info.Size()
+	fwd["fileToken"] = token
+	fwd["fileHostPort"] = port
+
+	// A drag-drop fetches the file inside the page, which can outrun a
+	// click; pass a generous timeout (the default is already 30s, but be
+	// explicit since this tool is I/O-bound).
+	raw, err := send("drag_drop_file", fwd, 30000)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

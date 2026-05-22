@@ -40,6 +40,7 @@ beforeAll(() => {
     'clickElement', 'typeText',
     'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
     'executeJS', 'injectScript',
+    'dragDropFile', 'runDropInPage', '__turboPerformDrop',
   ].join(', ');
 
   // Inject an export line right before the closing })(); so functions are accessible
@@ -985,5 +986,199 @@ describe('inspectForm', () => {
     const result = api.inspectForm({});
     expect(result.form.selector).toBe(''); // no form element
     expect(result.fields.map(f => f.name)).toEqual(['bare1', 'bare2']);
+  });
+});
+
+// ============================================================
+// drag_drop_file — non-CDP file upload
+// ============================================================
+describe('drag_drop_file', () => {
+  // jsdom 26 ships no DataTransfer/DragEvent. Polyfill just enough for
+  // __turboPerformDrop: a DataTransfer whose items.add builds a .files
+  // list, and a DragEvent that carries clientX/clientY like a real one.
+  beforeAll(() => {
+    if (typeof globalThis.DataTransfer === 'undefined') {
+      globalThis.DataTransfer = class DataTransfer {
+        constructor() { this._files = []; this.items = { add: (f) => this._files.push(f) }; }
+        get files() { return this._files; }
+      };
+    }
+    if (typeof globalThis.DragEvent === 'undefined') {
+      globalThis.DragEvent = class DragEvent extends Event {
+        constructor(type, init = {}) {
+          super(type, init);
+          this.clientX = init.clientX || 0;
+          this.clientY = init.clientY || 0;
+        }
+      };
+    }
+  });
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    globalThis.fetch = undefined;
+  });
+
+  // --- __turboPerformDrop: drop-zone path ---
+  it('dispatches dragenter/dragover/drop in order on a drop zone', async () => {
+    document.body.innerHTML = '<div class="dropzone">Drop here</div>';
+    const zone = document.querySelector('.dropzone');
+    mockRect(zone, { x: 10, y: 10, width: 200, height: 100 });
+
+    const seen = [];
+    let droppedFile = null;
+    for (const k of ['dragenter', 'dragover', 'drop']) {
+      zone.addEventListener(k, (ev) => {
+        seen.push(ev.type);
+        if (ev.type === 'drop') droppedFile = ev.dataTransfer.files[0];
+      });
+    }
+
+    const blob = new Blob(['report-bytes'], { type: 'application/pdf' });
+    const result = await api.__turboPerformDrop(zone, blob, 'report.pdf', 'application/pdf');
+
+    expect(seen).toEqual(['dragenter', 'dragover', 'drop']);
+    expect(result.method).toBe('drop');
+    expect(result.events_dispatched).toEqual(['dragenter', 'dragover', 'drop']);
+    expect(droppedFile).toBeInstanceOf(File);
+    expect(droppedFile.name).toBe('report.pdf');
+    expect(droppedFile.type).toBe('application/pdf');
+  });
+
+  it('attaches a DataTransfer carrying the File to the drop event', async () => {
+    document.body.innerHTML = '<div id="z"></div>';
+    const zone = document.querySelector('#z');
+    mockRect(zone, { x: 0, y: 0, width: 100, height: 100 });
+
+    let dt = null;
+    zone.addEventListener('drop', (ev) => { dt = ev.dataTransfer; });
+    const blob = new Blob(['abc']);
+    await api.__turboPerformDrop(zone, blob, 'a.txt', 'text/plain');
+
+    expect(dt).not.toBeNull();
+    expect(dt.files.length).toBe(1);
+    expect(dt.files[0].name).toBe('a.txt');
+  });
+
+  // --- __turboPerformDrop: input.files path (§3.5) ---
+  it('assigns input.files and fires input/change for an <input type=file>', async () => {
+    document.body.innerHTML = '<input type="file" id="f">';
+    const input = document.querySelector('#f');
+    mockRect(input, { x: 0, y: 0, width: 80, height: 20 });
+
+    // In a real browser DataTransfer.prototype.files IS a FileList and
+    // HTMLInputElement.files accepts it directly. jsdom has no DataTransfer
+    // and its input.files setter strictly type-checks FileList, so we make
+    // the property writable for this test to exercise the assignment +
+    // event-dispatch logic of __turboPerformDrop.
+    let assigned = null;
+    Object.defineProperty(input, 'files', {
+      get: () => assigned,
+      set: (v) => { assigned = v; },
+      configurable: true,
+    });
+
+    const events = [];
+    input.addEventListener('input', () => events.push('input'));
+    input.addEventListener('change', () => events.push('change'));
+
+    const blob = new Blob(['xyz'], { type: 'image/png' });
+    const result = await api.__turboPerformDrop(input, blob, 'pic.png', 'image/png');
+
+    expect(result.method).toBe('input.files');
+    expect(result.events_dispatched).toEqual(['input', 'change']);
+    expect(events).toEqual(['input', 'change']);
+    expect(input.files.length).toBe(1);
+    expect(input.files[0].name).toBe('pic.png');
+  });
+
+  // --- reaction warning (honest failure surfacing) ---
+  it('warns when the drop zone handler does not react', async () => {
+    document.body.innerHTML = '<div id="inert"></div>';
+    const zone = document.querySelector('#inert');
+    mockRect(zone, { x: 0, y: 0, width: 50, height: 50 });
+    // No listener mutates the DOM → MutationObserver sees nothing.
+    const result = await api.__turboPerformDrop(zone, new Blob(['x']), 'x.txt', 'text/plain');
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.warnings[0]).toMatch(/did not appear to react/);
+  });
+
+  it('does not warn when the handler mutates the DOM', async () => {
+    document.body.innerHTML = '<div id="live"></div>';
+    const zone = document.querySelector('#live');
+    mockRect(zone, { x: 0, y: 0, width: 50, height: 50 });
+    zone.addEventListener('drop', () => {
+      zone.appendChild(document.createElement('span')); // observable mutation
+    });
+    const result = await api.__turboPerformDrop(zone, new Blob(['x']), 'x.txt', 'text/plain');
+    expect(result.warnings.length).toBe(0);
+  });
+
+  // --- dragDropFile: pre-flight validation & fetch ---
+  it('rejects a missing target_selector', async () => {
+    await expect(api.dragDropFile({ fileName: 'a.txt' }))
+      .rejects.toThrow(/target_selector is required/);
+  });
+
+  it('rejects when no element matches the selector', async () => {
+    await expect(api.dragDropFile({
+      target_selector: '.nope', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+    })).rejects.toThrow(/No element matches selector/);
+  });
+
+  it('rejects a zero-size target element', async () => {
+    document.body.innerHTML = '<div class="hidden"></div>';
+    mockRect(document.querySelector('.hidden'), { x: 0, y: 0, width: 0, height: 0 });
+    await expect(api.dragDropFile({
+      target_selector: '.hidden', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+    })).rejects.toThrow(/zero-size bounding box/);
+  });
+
+  it('surfaces an unreachable file host', async () => {
+    document.body.innerHTML = '<div class="dz"></div>';
+    mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+    await expect(api.dragDropFile({
+      target_selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+    })).rejects.toThrow(/could not reach the loopback file host/);
+  });
+
+  it('surfaces an HTTP error from the file host (expired token)', async () => {
+    document.body.innerHTML = '<div class="dz"></div>';
+    mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 410 });
+    await expect(api.dragDropFile({
+      target_selector: '.dz', fileName: 'a.txt', fileHostPort: 18323, fileToken: 'tok',
+    })).rejects.toThrow(/HTTP 410/);
+  });
+
+  it('fetches the loopback file host with the token in the path', async () => {
+    document.body.innerHTML = '<div class="dz"></div>';
+    mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, blob: async () => new Blob(['bytes']),
+    });
+    // runDropInPage will not resolve here (the injected MAIN-world <script>
+    // does not execute under jsdom), so just assert the fetch URL shape.
+    api.dragDropFile({
+      target_selector: '.dz', fileName: 'a.txt', mimeType: 'text/plain',
+      size: 5, fileHostPort: 18399, fileToken: 'abc123',
+    }).catch(() => {});
+    await new Promise(r => setTimeout(r, 0));
+    expect(globalThis.fetch).toHaveBeenCalledWith('http://127.0.0.1:18399/file/abc123');
+  });
+
+  it('routes drag_drop_file through the message handler', () => {
+    document.body.innerHTML = '<div class="dz"></div>';
+    mockRect(document.querySelector('.dz'), { x: 0, y: 0, width: 100, height: 100 });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200, blob: async () => new Blob(['bytes']),
+    });
+    const sendResponse = vi.fn();
+    const r = messageHandler(
+      { action: 'drag_drop_file', params: { target_selector: '.dz', fileName: 'a.txt', fileHostPort: 1, fileToken: 't' } },
+      null, sendResponse,
+    );
+    expect(r).toBe(true); // async handler
   });
 });
