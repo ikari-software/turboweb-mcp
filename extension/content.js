@@ -1708,19 +1708,68 @@
       root = sr;
     }
 
+    // --- Agent-driven tab flag -------------------------------------------
+    // While an agent is acting on this tab, prepend the brand bolt to
+    // document.title so the browser tab strip shows which tabs an agent is
+    // driving. Removed when the tab goes idle. Shares the badge's lifecycle.
+    const TITLE_FLAG = '⚡ ';
+    let titleFlagActive = false;
+    let titleObserver = null;
+
+    // flagTitle prefixes document.title and keeps the prefix in place even
+    // as a single-page app rewrites its own title. Idempotent.
+    function flagTitle() {
+      if (titleFlagActive) return;
+      titleFlagActive = true;
+      if (!document.title.startsWith(TITLE_FLAG)) {
+        document.title = TITLE_FLAG + document.title;
+      }
+      if (!titleObserver) {
+        // Re-apply the flag when the page changes its own title. Our own
+        // write re-fires this, but the startsWith guard makes that a
+        // no-op — no loop.
+        titleObserver = new MutationObserver(() => {
+          if (titleFlagActive && !document.title.startsWith(TITLE_FLAG)) {
+            document.title = TITLE_FLAG + document.title;
+          }
+        });
+      }
+      titleObserver.observe(document.head || document.documentElement, {
+        childList: true, subtree: true, characterData: true,
+      });
+    }
+
+    // unflagTitle strips the prefix and stops tracking. Safe when not set.
+    function unflagTitle() {
+      if (!titleFlagActive) return;
+      titleFlagActive = false;
+      if (titleObserver) titleObserver.disconnect();
+      if (document.title.startsWith(TITLE_FLAG)) {
+        document.title = document.title.slice(TITLE_FLAG.length);
+      }
+    }
+
+    // hideBadge fades the agent badge and clears the tab-title flag in one
+    // step — both express the same state ("an agent is active on this tab").
+    function hideBadge() {
+      if (badge) badge.classList.remove('on');
+      unflagTitle();
+    }
+
     function setBadge({ display, intent }) {
       ensure();
       if (!badge) return;
       badge.querySelector('.agent-name').textContent = display || 'Agent';
       badge.querySelector('.label').textContent = intent || 'working…';
       badge.classList.add('on');
+      flagTitle();
       installProximityListener();
       clearTimeout(badgeTimer);
       // Hard ceiling — if showResult/showError never fire (shouldn't
       // happen but be defensive), the badge fades after BADGE_MAX.
       // Normal lifecycle: stays up while activeTasks is non-empty; fades
       // BADGE_TASK_END_GRACE_MS after the last task ends.
-      badgeTimer = setTimeout(() => badge.classList.remove('on'), BADGE_MAX_LIFETIME_MS);
+      badgeTimer = setTimeout(() => hideBadge(), BADGE_MAX_LIFETIME_MS);
     }
 
     // markTaskStart / markTaskEnd track the set of in-flight commands so
@@ -1742,7 +1791,7 @@
       // single stranded id doesn't permanently demote the grace-fade
       // behaviour ("size===0" path) for the rest of the session.
       badgeTimer = setTimeout(() => {
-        if (badge) badge.classList.remove('on');
+        hideBadge();
         activeTasks.clear();
       }, BADGE_MAX_LIFETIME_MS);
     }
@@ -1761,7 +1810,7 @@
       }
       if (activeTasks.size === 0) {
         clearTimeout(badgeTimer);
-        badgeTimer = setTimeout(() => badge && badge.classList.remove('on'), BADGE_TASK_END_GRACE_MS);
+        badgeTimer = setTimeout(() => hideBadge(), BADGE_TASK_END_GRACE_MS);
       }
     }
     // Ids whose end was already observed — used to ignore late starts
@@ -2510,12 +2559,12 @@
           cursor.style.transform = 'translate(-1000px, -1000px)';
           cursorPos = { x: window.innerWidth / 2, y: -40 };
         }
-        if (badge) badge.classList.remove('on');
+        hideBadge();
         clearAnchor();
       }, IDLE_FADE_MS);
     }
 
-    return { showStart, showResult, showError, showHandoff, clearHandoff };
+    return { showStart, showResult, showError, showHandoff, clearHandoff, unflagTitle };
   })();
 
   // --- DOM-mutation signal (the cheap complement to the pixel diff) ------

@@ -1525,3 +1525,39 @@ describe('screenshot_diff_meta', () => {
     expect(arg).toHaveProperty('dom');
   });
 });
+
+// ============================================================
+// agent-driven tab flag — ⚡ prefix on document.title
+// ============================================================
+describe('agent-driven tab flag', () => {
+  beforeEach(() => {
+    api.overlay.unflagTitle();           // reset module state between tests
+    document.title = 'Example Page';
+  });
+
+  it('prefixes the tab title with the brand bolt while an agent is active', async () => {
+    await api.overlay.showStart({ action: 'get_html', intent: 'reading the page', id: 't1' });
+    expect(document.title).toBe('⚡ Example Page');
+  });
+
+  it('does not double-prefix on repeated agent activity', async () => {
+    await api.overlay.showStart({ action: 'get_html', intent: 'one', id: 't1' });
+    await api.overlay.showStart({ action: 'get_html', intent: 'two', id: 't2' });
+    expect(document.title).toBe('⚡ Example Page');
+  });
+
+  it('re-applies the flag when the page rewrites its own title', async () => {
+    await api.overlay.showStart({ action: 'get_html', intent: 'reading', id: 't1' });
+    expect(document.title).toBe('⚡ Example Page');
+    document.title = 'Route Changed';                 // SPA-style title swap
+    await new Promise((r) => setTimeout(r, 0));        // let the observer fire
+    expect(document.title).toBe('⚡ Route Changed');
+  });
+
+  it('unflagTitle restores the original title', async () => {
+    await api.overlay.showStart({ action: 'get_html', intent: 'reading', id: 't1' });
+    expect(document.title).toBe('⚡ Example Page');
+    api.overlay.unflagTitle();
+    expect(document.title).toBe('Example Page');
+  });
+});
