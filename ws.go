@@ -694,12 +694,19 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 		return connectionStatusJSON(), nil
 	}
 
+	// Clone params before mutating: a caller may pass one map across several
+	// concurrent send() calls (handleDescribe fans out exactly this way), and
+	// writing _clientLabel/_clientHue into a shared map is a data race. The
+	// clone also covers the nil case — ranging a nil map yields no entries.
+	merged := make(map[string]any, len(params)+2)
+	for k, v := range params {
+		merged[k] = v
+	}
+	params = merged
+
 	// Ensure every outgoing command carries client-attribution metadata so the
 	// extension popup can attribute it. The relay handler may have already
 	// attached _clientLabel; only fill it from our session if absent.
-	if params == nil {
-		params = map[string]any{}
-	}
 	if _, ok := params["_clientLabel"]; !ok {
 		if lbl := getSessionLabel(); lbl != "" {
 			params["_clientLabel"] = lbl
