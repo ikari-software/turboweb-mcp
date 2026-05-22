@@ -1,13 +1,20 @@
 name: release
 
 # Fires when a release is published from a v* tag. Builds the cross-
-# platform Go binaries + per-browser extension zips, signs every asset
-# via Sigstore (keyless OIDC — no key material to leak), and uploads
-# everything to the GitHub release.
+# platform Go binaries + per-browser extension packages, AMO-signs the
+# Firefox .xpi, generates firefox-updates.json (the Firefox auto-update
+# manifest), signs every asset via Sigstore (keyless OIDC — no key
+# material to leak), and uploads everything to the GitHub release.
 #
-# Users verify with `cosign verify-blob` — see SECURITY.md for the
-# exact command. Verification proves the binary came from this repo's
-# release workflow, not a fork or a tampered upload.
+# Firefox auto-update depends on this workflow shipping BOTH the signed
+# .xpi and firefox-updates.json: the extension's update_url points at
+# releases/latest/download/firefox-updates.json, which Firefox polls.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   WEB_EXT_API_KEY, WEB_EXT_API_SECRET
+# from https://addons.mozilla.org/developers/addon/api/key/
+#
+# Users verify downloads with `cosign verify-blob` — see SECURITY.md.
 
 on:
   release:
@@ -42,29 +49,38 @@ jobs:
         working-directory: extension
         run: npm ci
 
-      - name: Build everything
+      # `make release` writes every artifact to dist/: cross-compiled Go
+      # binaries, per-browser extension zips, the AMO-signed .xpi, and
+      # firefox-updates.json. The WEB_EXT_* secrets drive `web-ext sign`.
+      - name: Build release artifacts (binaries + extension + signed XPI)
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
         run: make release
 
+      # The Makefile's xpi/updates-json targets skip silently when the
+      # AMO credentials are absent. A release without them breaks Firefox
+      # auto-update — fail loudly here instead of shipping a broken one.
+      - name: Verify Firefox auto-update artifacts
+        run: |
+          test -f dist/firefox-updates.json \
+            || { echo "::error::dist/firefox-updates.json missing — set WEB_EXT_API_KEY / WEB_EXT_API_SECRET repo secrets"; exit 1; }
+          ls dist/*.xpi >/dev/null 2>&1 \
+            || { echo "::error::no signed .xpi in dist/ — AMO signing did not run"; exit 1; }
+
       - name: Inventory
-        run: ls -lh bin/
+        run: ls -lh dist/
 
       - name: Generate SHA256SUMS
-        working-directory: bin
+        working-directory: dist
         run: |
-          # One canonical checksum file. Users grab this + its signature
-          # to verify every asset in one cosign call instead of N.
-          sha256sum \
-            turboweb-mcp-by-ikari-darwin-arm64 \
-            turboweb-mcp-by-ikari-linux-amd64 \
-            turboweb-mcp-by-ikari-windows-amd64.exe \
-            turboweb-mcp-by-ikari-windows-arm64.exe \
-            turboweb-mcp-by-ikari-extension-chrome.zip \
-            turboweb-mcp-by-ikari-extension-firefox.zip \
-            > SHA256SUMS
+          # One canonical checksum file covering every release asset.
+          # Users grab this + its signature to verify all assets at once.
+          sha256sum turboweb-mcp-by-ikari-* firefox-updates.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Sign SHA256SUMS with cosign (keyless)
-        working-directory: bin
+        working-directory: dist
         env:
           COSIGN_YES: "true"
         run: |
@@ -79,15 +95,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.event.release.tag_name }}"
-          gh release upload "$tag" \
-            bin/turboweb-mcp-by-ikari-darwin-arm64 \
-            bin/turboweb-mcp-by-ikari-linux-amd64 \
-            bin/turboweb-mcp-by-ikari-windows-amd64.exe \
-            bin/turboweb-mcp-by-ikari-windows-arm64.exe \
-            bin/turboweb-mcp-by-ikari-extension-chrome.zip \
-            bin/turboweb-mcp-by-ikari-extension-firefox.zip \
-            bin/SHA256SUMS \
-            bin/SHA256SUMS.sig \
-            bin/SHA256SUMS.crt \
-            bin/SHA256SUMS.cosign.bundle \
-            --clobber
+          gh release upload "$tag" dist/* --clobber

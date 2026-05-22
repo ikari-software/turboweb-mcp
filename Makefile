@@ -1,8 +1,8 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.3.0
+VERSION = 1.4.0
 GITHUB_REPO = ikari-software/turboweb-mcp
 
-.PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi firefox-updates-json watch
+.PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
 # cross-compiled binaries) live in dist/.
@@ -55,6 +55,16 @@ extension-zip: extension
 	cd extension/dist && rm -f ../../dist/$(BINARY)-extension-chrome.zip ../../dist/$(BINARY)-extension-firefox.zip
 	cd extension/dist && zip -qr ../../dist/$(BINARY)-extension-chrome.zip chrome
 	cd extension/dist && zip -qr ../../dist/$(BINARY)-extension-firefox.zip firefox
+
+# Store-ready Chrome zip. Unlike extension-zip (which nests everything
+# under chrome/ for "load unpacked"), the Chrome Web Store requires
+# manifest.json at the zip ROOT — so this zips the *contents* of the
+# built chrome/ dir. See CHROME_STORE.md for the submission flow.
+chrome-store: extension
+	mkdir -p dist
+	rm -f "dist/$(BINARY)-chrome-store-$(VERSION).zip"
+	cd extension/dist/chrome && zip -qr "$(CURDIR)/dist/$(BINARY)-chrome-store-$(VERSION).zip" .
+	@echo "chrome-store: dist/$(BINARY)-chrome-store-$(VERSION).zip"
 
 # Produce an AMO-signed .xpi from extension/dist/firefox/ via web-ext sign.
 # Requires WEB_EXT_API_KEY and WEB_EXT_API_SECRET from
