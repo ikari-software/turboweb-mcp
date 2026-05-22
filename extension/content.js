@@ -1711,14 +1711,24 @@
     // --- Agent-driven tab flag -------------------------------------------
     // While an agent is acting on this tab, prepend the brand bolt to
     // document.title so the browser tab strip shows which tabs an agent is
-    // driving. Removed when the tab goes idle. Shares the badge's lifecycle.
+    // driving. The flag runs on its own grace timer, independent of the
+    // badge: it clears TITLE_FLAG_GRACE_MS after the agent's *last* action,
+    // long enough to stay steady across the gaps between tool calls (model
+    // thinking time) so the tab title never flickers mid-run.
     const TITLE_FLAG = '⚡ ';
+    const TITLE_FLAG_GRACE_MS = 15_000;
     let titleFlagActive = false;
     let titleObserver = null;
+    let titleFlagTimer = null;
 
     // flagTitle prefixes document.title and keeps the prefix in place even
-    // as a single-page app rewrites its own title. Idempotent.
+    // as a single-page app rewrites its own title. Called on every agent
+    // action; re-arms the grace timer each call so the flag clears
+    // TITLE_FLAG_GRACE_MS after the last one.
     function flagTitle() {
+      // Re-arm on every call, including when the flag is already up.
+      if (titleFlagTimer) clearTimeout(titleFlagTimer);
+      titleFlagTimer = setTimeout(unflagTitle, TITLE_FLAG_GRACE_MS);
       if (titleFlagActive) return;
       titleFlagActive = true;
       if (!document.title.startsWith(TITLE_FLAG)) {
@@ -1741,6 +1751,7 @@
 
     // unflagTitle strips the prefix and stops tracking. Safe when not set.
     function unflagTitle() {
+      if (titleFlagTimer) { clearTimeout(titleFlagTimer); titleFlagTimer = null; }
       if (!titleFlagActive) return;
       titleFlagActive = false;
       if (titleObserver) titleObserver.disconnect();
@@ -1749,11 +1760,12 @@
       }
     }
 
-    // hideBadge fades the agent badge and clears the tab-title flag in one
-    // step — both express the same state ("an agent is active on this tab").
+    // hideBadge fades the agent badge. The tab-title flag is deliberately
+    // NOT cleared here — it runs on its own longer grace timer (see
+    // flagTitle) so it doesn't blink off in the ~1.8s gaps between an
+    // agent's tool calls.
     function hideBadge() {
       if (badge) badge.classList.remove('on');
-      unflagTitle();
     }
 
     function setBadge({ display, intent }) {

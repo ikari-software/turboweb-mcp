@@ -1560,4 +1560,31 @@ describe('agent-driven tab flag', () => {
     api.overlay.unflagTitle();
     expect(document.title).toBe('Example Page');
   });
+
+  it('keeps the flag through the 15s grace, then clears it', async () => {
+    vi.useFakeTimers();
+    try {
+      await api.overlay.showStart({ action: 'get_html', intent: 'reading', id: 't1' });
+      expect(document.title).toBe('⚡ Example Page');
+      vi.advanceTimersByTime(14_000);
+      expect(document.title).toBe('⚡ Example Page');   // still flagged at 14s
+      vi.advanceTimersByTime(2_000);
+      expect(document.title).toBe('Example Page');      // cleared past 15s
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a fresh action re-arms the grace so the flag does not flicker mid-run', async () => {
+    vi.useFakeTimers();
+    try {
+      await api.overlay.showStart({ action: 'get_html', intent: 'step 1', id: 't1' });
+      vi.advanceTimersByTime(12_000);                   // 12s into the grace
+      await api.overlay.showStart({ action: 'get_html', intent: 'step 2', id: 't2' });
+      vi.advanceTimersByTime(12_000);                   // 24s total, 12s since step 2
+      expect(document.title).toBe('⚡ Example Page');   // re-armed — still up
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
