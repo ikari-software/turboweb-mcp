@@ -116,6 +116,18 @@ func registerDomTools(s *server.MCPServer) {
 		),
 		handleQueryElements,
 	)
+
+	// --- page_capabilities ---
+	addTool(s,
+		mcp.NewTool("page_capabilities",
+			mcp.WithDescription("Probe what the current page supports before automating it. Returns "+
+				"cdp_available (whether cdp_* tools work), csp_allows_eval (whether execute_js works "+
+				"— strict CSPs block it), framework (react/vue/svelte/angular/unknown), monaco_present, "+
+				"iframes_count, and shadow_roots_count. Call this first when a page fights automation."),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		handlePageCapabilities,
+	)
 }
 
 func handleExtractText(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -298,6 +310,14 @@ func handleGetInteractiveMap(_ context.Context, req mcp.CallToolRequest) (*mcp.C
 func handleQueryElements(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	raw, err := send("query_elements", rawArgs(args))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func handlePageCapabilities(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	raw, err := send("page_capabilities", rawArgs(req.GetArguments()))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

@@ -36,7 +36,8 @@ beforeAll(() => {
 
   const fns = [
     'sel', 'viewport', 'extractText', 'findText', 'inspectElement',
-    'getInteractiveMap', 'queryElements', 'clickElement', 'typeText',
+    'getInteractiveMap', 'queryElements', 'pageCapabilities',
+    'clickElement', 'typeText',
     'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
     'executeJS', 'injectScript',
   ].join(', ');
@@ -404,6 +405,69 @@ describe('queryElements', () => {
     const result = api.queryElements({ selector: 'div' });
     expect(result.viewport).toHaveProperty('w', 1280);
   });
+
+  it('enriches form fields with structured field metadata', () => {
+    document.body.innerHTML =
+      '<label for="wf">Workflow ID</label>' +
+      '<input id="wf" name="workflowId" type="text" value="abc" required placeholder="enter id">';
+    mockAllRects();
+    const result = api.queryElements({ selector: '#wf' });
+    const field = result.elements[0].field;
+    expect(field).toMatchObject({
+      type: 'text',
+      name: 'workflowId',
+      id: 'wf',
+      value: 'abc',
+      placeholder: 'enter id',
+      required: true,
+      label: 'Workflow ID',
+    });
+  });
+
+  it('reports select options in field metadata', () => {
+    document.body.innerHTML =
+      '<select id="s"><option value="a">A</option><option value="b" selected>B</option></select>';
+    mockAllRects();
+    const result = api.queryElements({ selector: '#s' });
+    expect(result.elements[0].field.type).toBe('select');
+    expect(result.elements[0].field.options).toEqual([
+      { value: 'a', text: 'A', selected: false },
+      { value: 'b', text: 'B', selected: true },
+    ]);
+  });
+
+  it('omits field metadata for non-form elements', () => {
+    document.body.innerHTML = '<div id="d">x</div>';
+    mockAllRects();
+    const result = api.queryElements({ selector: '#d' });
+    expect(result.elements[0].field).toBeUndefined();
+  });
+});
+
+// ============================================================
+// pageCapabilities()
+// ============================================================
+describe('pageCapabilities', () => {
+  it('reports framework, iframe and shadow-root counts', () => {
+    document.body.innerHTML = '<div data-reactroot><iframe></iframe></div>';
+    const result = api.pageCapabilities();
+    expect(result.framework).toBe('react');
+    expect(result.iframes_count).toBe(1);
+    expect(result.shadow_roots_count).toBe(0);
+    expect(result.monaco_present).toBe(false);
+  });
+
+  it('counts open shadow roots', () => {
+    document.body.innerHTML = '<div id="host"></div>';
+    document.getElementById('host').attachShadow({ mode: 'open' });
+    const result = api.pageCapabilities();
+    expect(result.shadow_roots_count).toBe(1);
+  });
+
+  it('falls back to unknown framework', () => {
+    document.body.innerHTML = '<div>plain</div>';
+    expect(api.pageCapabilities().framework).toBe('unknown');
+  });
 });
 
 // ============================================================
@@ -438,6 +502,16 @@ describe('clickElement', () => {
     expect(result).toHaveProperty('clicked');
   });
 
+  it('focuses an input it clicks so the field is actually active', () => {
+    document.body.innerHTML = '<input id="inp" type="text">';
+    const inp = document.getElementById('inp');
+    mockRect(inp, { x: 0, y: 0, width: 100, height: 20 });
+
+    const result = api.clickElement({ selector: '#inp' });
+    expect(document.activeElement).toBe(inp);
+    expect(result.focused).toBe(true);
+  });
+
   it('throws when selector not found', () => {
     expect(() => api.clickElement({ selector: '#nope' })).toThrow('Element not found');
   });
@@ -463,7 +537,34 @@ describe('typeText', () => {
 
     const result = api.typeText({ selector: '#inp', text: 'hello' });
     expect(focusSpy).toHaveBeenCalled();
-    expect(result).toEqual({ typed: 5, element: '#inp' });
+    expect(inp.value).toBe('hello');
+    expect(result).toEqual({ typed: 5, verified: true, value: 'hello', element: '#inp' });
+  });
+
+  it('dispatches an input event so framework-controlled inputs react', () => {
+    document.body.innerHTML = '<input id="inp" type="text">';
+    const inp = document.getElementById('inp');
+    const events = [];
+    inp.addEventListener('input', () => events.push('input'));
+    inp.addEventListener('change', () => events.push('change'));
+
+    api.typeText({ selector: '#inp', text: 'hi' });
+    expect(events).toEqual(['input', 'change']);
+  });
+
+  it('reports verified:false when the value does not stick', () => {
+    document.body.innerHTML = '<input id="inp" type="text">';
+    const inp = document.getElementById('inp');
+    // Simulate a framework that owns the value and reverts it: an instance
+    // getter that always reads empty. typeText writes through the prototype
+    // setter, but its verify step reads back through this getter.
+    Object.defineProperty(inp, 'value', {
+      get: () => '', set: () => {}, configurable: true,
+    });
+
+    const result = api.typeText({ selector: '#inp', text: 'nope' });
+    expect(result.verified).toBe(false);
+    expect(result.hint).toBeTruthy();
   });
 
   it('types into active element when no selector', () => {
@@ -474,13 +575,21 @@ describe('typeText', () => {
     expect(result.typed).toBe(1);
   });
 
-  it('clears input before typing when clear=true', () => {
+  it('replaces the value when clear=true', () => {
     document.body.innerHTML = '<input id="inp" value="old">';
     const inp = document.getElementById('inp');
-    const selectSpy = vi.spyOn(inp, 'select');
 
-    api.typeText({ selector: '#inp', text: 'new', clear: true });
-    expect(selectSpy).toHaveBeenCalled();
+    const result = api.typeText({ selector: '#inp', text: 'new', clear: true });
+    expect(inp.value).toBe('new');
+    expect(result.verified).toBe(true);
+  });
+
+  it('appends to the existing value when clear is not set', () => {
+    document.body.innerHTML = '<input id="inp" value="ab">';
+    const inp = document.getElementById('inp');
+
+    api.typeText({ selector: '#inp', text: 'cd' });
+    expect(inp.value).toBe('abcd');
   });
 
   it('dispatches enter key events when pressEnter=true', () => {

@@ -137,3 +137,18 @@ if (typeof HTMLElement.prototype.innerText === 'undefined') {
 if (typeof document.execCommand !== 'function') {
   document.execCommand = vi.fn().mockReturnValue(true);
 }
+
+// jsdom doesn't implement PointerEvent — content.js click() dispatches the
+// full pointer+mouse sequence a real click produces. PointerEvent extends
+// MouseEvent in the spec, so a thin subclass is a faithful polyfill.
+if (typeof globalThis.PointerEvent === 'undefined') {
+  globalThis.PointerEvent = class PointerEvent extends MouseEvent {
+    constructor(type, params = {}) {
+      super(type, params);
+      this.pointerId = params.pointerId ?? 0;
+      this.pointerType = params.pointerType ?? '';
+      this.isPrimary = params.isPrimary ?? false;
+    }
+  };
+  if (typeof window !== 'undefined') window.PointerEvent = globalThis.PointerEvent;
+}

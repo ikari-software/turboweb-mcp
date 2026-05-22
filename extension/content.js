@@ -321,6 +321,49 @@
     return { viewport: viewport(), elements: items };
   }
 
+  // --- Form-field metadata ---
+  // The accessible label for a control: associated <label> (for= or wrapping),
+  // else aria-label, else aria-labelledby target text.
+  function labelFor(el) {
+    if (el.labels && el.labels.length) {
+      return el.labels[0].textContent.trim().substring(0, 120);
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria.trim().substring(0, 120);
+    const lblId = el.getAttribute('aria-labelledby');
+    if (lblId) {
+      const lbl = document.getElementById(lblId);
+      if (lbl) return lbl.textContent.trim().substring(0, 120);
+    }
+    return null;
+  }
+
+  // Structured view of a form control — the live value/checked state, label,
+  // and constraints an agent needs to actually fill a form. Raw attributes
+  // alone are not enough: `value` is a live property (not an attribute), and
+  // the label usually lives in a separate element. Returns null for non-fields.
+  function fieldInfo(el) {
+    const tag = el.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') return null;
+    const f = { type: tag === 'INPUT' ? el.type : tag.toLowerCase() };
+    if (el.name) f.name = el.name;
+    if (el.id) f.id = el.id;
+    f.value = el.value;
+    if (el.placeholder) f.placeholder = el.placeholder;
+    if (el.required) f.required = true;
+    if (el.disabled) f.disabled = true;
+    if (el.readOnly) f.readonly = true;
+    if (el.type === 'checkbox' || el.type === 'radio') f.checked = el.checked;
+    if (typeof el.maxLength === 'number' && el.maxLength >= 0) f.maxLength = el.maxLength;
+    const label = labelFor(el);
+    if (label) f.label = label;
+    if (tag === 'SELECT') {
+      f.options = [...el.options].slice(0, 30)
+        .map((o) => ({ value: o.value, text: o.text.trim(), selected: o.selected }));
+    }
+    return f;
+  }
+
   // --- CSS selector query with positions ---
   function queryElements({ selector, limit = 50 }) {
     const els = document.querySelectorAll(selector);
@@ -331,16 +374,49 @@
       const r = el.getBoundingClientRect();
       const attrs = {};
       for (const a of el.attributes) attrs[a.name] = a.value.substring(0, 200);
-      out.push({
+      const item = {
         tag: el.tagName.toLowerCase(),
         text: (el.textContent || '').trim().substring(0, 300),
         x: Math.round(r.x), y: Math.round(r.y),
         w: Math.round(r.width), h: Math.round(r.height),
         attrs,
         selector: sel(el),
-      });
+      };
+      // Surface form-field state so an agent can reason about a form without
+      // a separate inspect call per input.
+      const field = fieldInfo(el);
+      if (field) item.field = field;
+      out.push(item);
     }
     return { viewport: viewport(), count: els.length, elements: out };
+  }
+
+  // --- Page capability probe ---
+  // Best-effort diagnostics so an agent can route around a page's constraints
+  // up front instead of discovering each broken tool one failed call at a
+  // time. The CSP-eval check is deliberately NOT done here: content scripts
+  // run in an isolated world the page CSP does not govern, so background.js
+  // probes the page's MAIN world for that and merges it into the result.
+  function pageCapabilities() {
+    const q = (s) => { try { return document.querySelector(s); } catch { return null; } };
+
+    let framework = 'unknown';
+    if (window.__svelte || q('[class*="svelte-"]')) framework = 'svelte';
+    else if (window.React || window.__REACT_DEVTOOLS_GLOBAL_HOOK__ || q('[data-reactroot]')) framework = 'react';
+    else if (window.Vue || window.__VUE__ || q('[data-v-app]')) framework = 'vue';
+    else if (window.ng || q('[ng-version]')) framework = 'angular';
+
+    let shadowRoots = 0;
+    for (const el of document.querySelectorAll('*')) {
+      if (el.shadowRoot) shadowRoots++;
+    }
+
+    return {
+      framework,
+      monaco_present: !!(window.monaco || q('.monaco-editor')),
+      iframes_count: document.querySelectorAll('iframe,frame').length,
+      shadow_roots_count: shadowRoots,
+    };
   }
 
   // --- Click ---
@@ -359,13 +435,34 @@
     const r = el.getBoundingClientRect();
     const cx = r.x + r.width / 2;
     const cy = r.y + r.height / 2;
-    const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy };
+    const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0 };
+    const ptrOpts = { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true };
 
+    // A real pointer press also fires pointer events and — critically — moves
+    // focus to the control. Synthetic MouseEvents alone never focus anything,
+    // so an input clicked this way looked clicked but stayed inert: it was not
+    // the active element, and the type_text that followed went nowhere.
+    // Dispatch the full pointer+mouse sequence and explicitly focus the nearest
+    // focusable target between press and release, as a trusted click does.
+    const focusable = el.closest(
+      'input,textarea,select,button,a[href],[contenteditable=""],' +
+      '[contenteditable="true"],[tabindex]'
+    ) || el;
+
+    el.dispatchEvent(new PointerEvent('pointerover', ptrOpts));
+    el.dispatchEvent(new PointerEvent('pointerenter', { ...ptrOpts, bubbles: false }));
+    el.dispatchEvent(new MouseEvent('mouseover', opts));
+    el.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
+
+    try { focusable.focus({ preventScroll: true }); } catch { /* not focusable */ }
+
+    el.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.dispatchEvent(new MouseEvent('click', opts));
 
-    const out = { clicked: sel(el), x: Math.round(cx), y: Math.round(cy) };
+    const focused = document.activeElement === focusable && focusable !== document.body;
+    const out = { clicked: sel(el), x: Math.round(cx), y: Math.round(cy), focused };
 
     // Hint when synthetic clicks tend to misfire — most often because the
     // page uses <a href="javascript:..."> (CSP blocks the navigation) or
@@ -385,17 +482,34 @@
 
     el.focus();
 
-    if (clear) {
-      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-        el.select();
-      } else {
-        document.execCommand('selectAll');
-      }
-      document.execCommand('delete');
-    }
+    const isField = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
 
-    // insertText triggers proper input events (works with React, Vue, etc.)
-    document.execCommand('insertText', false, text);
+    if (isField) {
+      // Framework-controlled inputs (React/Vue/Svelte/Solid) own their value:
+      // React installs a per-instance value setter and tracks the last value
+      // it wrote, so a plain `el.value = x` is either invisible or reverted on
+      // the next render. The fix every testing library uses: write through the
+      // *prototype* value setter (bypassing React's instance setter so its
+      // change tracker sees a delta), then dispatch a bubbling `input` event
+      // so the framework's handler reads the new value. `change` follows for
+      // listeners (and <select>-style logic) that key off it.
+      const proto = el.tagName === 'TEXTAREA'
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      const next = clear ? text : (el.value + text);
+      nativeSetter.call(el, next);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // contenteditable / other editable hosts have no .value — execCommand
+      // keeps caret semantics and fires the native input events.
+      if (clear) {
+        document.execCommand('selectAll');
+        document.execCommand('delete');
+      }
+      document.execCommand('insertText', false, text);
+    }
 
     if (pressEnter) {
       const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
@@ -404,7 +518,23 @@
       el.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
     }
 
-    return { typed: text.length, element: sel(el) };
+    // Verify the value actually landed. type_text must not claim success when
+    // a disabled field, a maxlength cap, an input-type rejection (e.g. letters
+    // into type=number), or stolen focus silently dropped the text.
+    let verified = true;
+    if (isField) {
+      verified = clear ? el.value === text : el.value.includes(text);
+    }
+    const out = { typed: text.length, verified, element: sel(el) };
+    if (isField) {
+      out.value = el.value;
+      if (!verified) {
+        out.hint = 'Value did not stick — the field may be disabled, capped by '
+          + 'maxlength, reject this input type, or be inside an iframe. '
+          + 'Check page_capabilities, or retry with cdp_type (trusted input).';
+      }
+    }
+    return out;
   }
 
   // --- Scroll ---
@@ -1800,6 +1930,7 @@
       inspect: (p) => inspectElement(p),
       get_interactive_map: () => getInteractiveMap(),
       query_elements: (p) => queryElements(p),
+      page_capabilities: () => pageCapabilities(),
       click: (p) => clickElement(p),
       type_text: (p) => typeText(p),
       scroll: (p) => scrollPage(p),

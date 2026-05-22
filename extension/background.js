@@ -907,6 +907,29 @@ async function dispatch(action, params) {
     case 'query_elements':
       return await toContent(params.tabId, 'query_elements', { selector: params.selector, limit: params.limit });
 
+    case 'page_capabilities': {
+      const tid = await resolveTab(params.tabId);
+      const page = await toContent(tid, 'page_capabilities');
+      // The CSP eval probe must run in the page's MAIN world: execute_js runs
+      // there and the page's own CSP (not the extension's) governs eval. A
+      // strict script-src without 'unsafe-eval' makes execute_js silently
+      // fail, so detecting it up front lets an agent route around it.
+      let cspAllowsEval = false;
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: tid },
+          func: () => { try { eval('1'); return true; } catch { return false; } },
+          world: 'MAIN',
+        });
+        cspAllowsEval = res[0]?.result === true;
+      } catch { cspAllowsEval = false; }
+      return {
+        cdp_available: typeof chrome !== 'undefined' && !!chrome.debugger,
+        csp_allows_eval: cspAllowsEval,
+        ...page,
+      };
+    }
+
     case 'click':
       return await toContent(params.tabId, 'click', { selector: params.selector, x: params.x, y: params.y });
 
