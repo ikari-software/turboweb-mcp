@@ -1,5 +1,5 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.5.1
+VERSION = 1.6.0
 GITHUB_REPO = ikari-software/turboweb-mcp
 
 .PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
