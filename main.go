@@ -86,6 +86,7 @@ func registerAllTools(s *server.MCPServer) {
 	registerJsTools(s)
 	registerDebugTools(s)
 	registerFileTools(s)
+	registerUpdateTools(s)
 	registerCustomTools(s)
 }
 

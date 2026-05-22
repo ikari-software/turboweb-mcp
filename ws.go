@@ -145,6 +145,9 @@ func RunDaemon() error {
 	}
 
 	logger.Printf("Daemon WebSocket server on ws://%s", addr)
+	// Warm the release-check cache in the background so connection_status
+	// can surface "update available" without a blocking GitHub call.
+	startUpdateChecker()
 	return http.Serve(ln, mux)
 }
 
@@ -565,14 +568,23 @@ func connectionStatusJSON() json.RawMessage {
 		names[i] = b.name
 		b.mu.Unlock()
 	}
-	raw, _ := json.Marshal(map[string]any{
+	status := map[string]any{
 		"connected":      len(open) > 0 || getBiDi() != nil,
 		"extension":      len(open) > 0,
 		"bidi":           getBiDi() != nil,
 		"browsers":       names,
 		"extensionCount": len(open),
 		"wsPort":         wsPort,
-	})
+		"version":        serverVersion,
+	}
+	// Surface "an update is available" passively — read-only, from the
+	// cache the background checker warms. Never triggers a GitHub call,
+	// so connection_status stays within its 3s diagnostic budget.
+	if u := peekUpdateStatus(); u != nil && u.UpdateAvailable {
+		status["updateAvailable"] = true
+		status["latestVersion"] = u.LatestVersion
+	}
+	raw, _ := json.Marshal(status)
 	return raw
 }
 
