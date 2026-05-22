@@ -277,24 +277,9 @@ func zeroRect(img *image.RGBA, r image.Rectangle) {
 // pixelDelta is the luma-weighted per-pixel distance in [0,1]: the pixelmatch
 // channel weighting (green dominates perceived brightness) normalized so the
 // theoretical maximum is 1.0. A small floor (the caller's Threshold)
-// absorbs JPEG quantization noise.
+// absorbs JPEG quantization noise. It is the same-row case of pixelDeltaShift.
 func pixelDelta(a, b *image.RGBA, x, y int) float64 {
-	ia := a.PixOffset(x, y)
-	ib := b.PixOffset(x, y)
-	dr := float64(a.Pix[ia+0]) - float64(b.Pix[ib+0])
-	dg := float64(a.Pix[ia+1]) - float64(b.Pix[ib+1])
-	db := float64(a.Pix[ia+2]) - float64(b.Pix[ib+2])
-	if dr < 0 {
-		dr = -dr
-	}
-	if dg < 0 {
-		dg = -dg
-	}
-	if db < 0 {
-		db = -db
-	}
-	// Weights sum to 1.6; dividing by 1.6·255 maps the worst case to 1.0.
-	return (0.6*dr + 0.7*dg + 0.3*db) / (1.6 * 255.0)
+	return pixelDeltaShift(a, b, x, y, y)
 }
 
 // detectScroll cross-correlates a few horizontal strips at candidate

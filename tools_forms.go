@@ -374,7 +374,7 @@ func verifyField(intended string, fields []formField, sel string) (status, actua
 // fields to URL params, build the URL, navigate, then re-inspect and verify.
 // Failure modes return a structured prefilled:false verdict (textResult)
 // rather than an MCP error — only transport failures bubble up as errors.
-func handleTryURLPrefill(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleTryURLPrefill(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	baseURL := getString(args, "url", "")
 	if baseURL == "" {
@@ -471,8 +471,14 @@ func handleTryURLPrefill(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	}
 
 	// --- Wait for the SPA to hydrate, then re-inspect & verify. ---
+	// Honour context cancellation so a disconnected client doesn't leave the
+	// handler sleeping out a multi-second settle for nothing.
 	if settleMs > 0 {
-		time.Sleep(time.Duration(settleMs) * time.Millisecond)
+		select {
+		case <-time.After(time.Duration(settleMs) * time.Millisecond):
+		case <-ctx.Done():
+			return mcp.NewToolResultError(ctx.Err().Error()), nil
+		}
 	}
 	rawB, err := send("inspect_form", inspectParams(false), 8000)
 	if err != nil {
@@ -563,12 +569,10 @@ func buildPrefillResult(prefilled, navigated bool, builtURL string, mappings []f
 
 		switch {
 		case plan:
-			// Dry run — no verification has happened.
+			// Dry run — no verification has happened. A field is "planned"
+			// only if a param was written for it; everything else is unmapped.
 			if m.Param != "" {
 				fe["status"] = "planned"
-			} else if m.Selector == "" {
-				fe["status"] = "unmapped"
-				fe["reason"] = m.Reason
 			} else {
 				fe["status"] = "unmapped"
 				fe["reason"] = m.Reason

@@ -2462,17 +2462,13 @@
     // isOverlayNode filters out TurboWeb's own overlay subtree: the agent
     // cursor, intent toast and flash are injected into the page and would
     // otherwise inflate the counts (the same nodes the pixel diff masks).
+    // closest() is a native ancestor search — cheaper than a manual walk and
+    // uncapped — and matches by id so it works before the overlay's host
+    // reference is wired up.
     function isOverlayNode(node) {
-      let el = node;
-      // Text/attribute mutations carry the affected element as .target;
-      // walk up to the document looking for the overlay host.
-      for (let i = 0; el && i < 30; i++) {
-        if (el.id === '__turbo_overlay_host') return true;
-        if (el.nodeType === Node.ELEMENT_NODE && el.hasAttribute &&
-            el.hasAttribute('data-turbo-overlay')) return true;
-        el = el.parentNode || (el.getRootNode && el.getRootNode().host);
-      }
-      return false;
+      if (!node) return false;
+      const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+      return !!(el && el.closest && el.closest('#__turbo_overlay_host'));
     }
 
     // record folds one MutationRecord into the rolling counters, skipping
