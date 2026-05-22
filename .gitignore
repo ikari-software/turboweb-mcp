@@ -24,3 +24,8 @@ nc_disclosure_training_transcript.txt
 .dolt/
 *.db
 .beads-credential-key
+
+# Agent / tooling scratch dirs
+.omc/
+.claude/
+.DS_Store
