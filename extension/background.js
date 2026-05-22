@@ -1030,6 +1030,22 @@ async function dispatch(action, params) {
       return await toContent(tid, 'inspect_form', { selector: params.formSelector });
     }
 
+    // --- screenshot_diff content-bridge actions ---
+    // Pass-through to the content script: it owns the MutationObserver and
+    // resolves `ignore` selectors to bounding boxes (the Go side computes
+    // the pixel diff). No new screenshot logic — screenshot_diff reuses the
+    // existing `screenshot` action above.
+    case 'dom_mutations_mark':
+      return await toContent(params.tabId, 'dom_mutations_mark');
+
+    case 'dom_mutations_since':
+      return await toContent(params.tabId, 'dom_mutations_since', { since: params.since });
+
+    case 'screenshot_diff_meta':
+      return await toContent(params.tabId, 'screenshot_diff_meta', {
+        ignore: params.ignore, since: params.since,
+      });
+
     // --- Chrome's built-in Gemini Nano (Prompt API / Built-in AI) ---
     // Used by the Go server's local-AI fallback so users without an
     // ANTHROPIC_API_KEY still get question-answering on tool results.

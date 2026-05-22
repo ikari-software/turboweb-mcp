@@ -2180,6 +2180,201 @@
     return { showStart, showResult, showError };
   })();
 
+  // --- DOM-mutation signal (the cheap complement to the pixel diff) ------
+  // A persistent MutationObserver answers "did the DOM change?" for free —
+  // no screenshot, no image, a handful of bytes. screenshot_diff folds this
+  // into its verdict; for most actions (a click that opens a menu, a type
+  // that fills a field) the DOM signal alone is sufficient and the pixel
+  // diff becomes a confirm-only fallback. See design/screenshot_diff.md §5.
+  const domSignal = (() => {
+    // Rolling counters since process start. screenshot_diff_meta diffs
+    // these against a stored mark snapshot rather than resetting them, so
+    // overlapping verify windows don't clobber each other.
+    let total = { mutations: 0, added: 0, removed: 0, attrs: 0, text: 0 };
+    // Coarse CSS-path label of the highest-impact mutated node, as a
+    // "what changed" hint. Reset whenever a fresh mark is taken.
+    let largestSubtree = '';
+    let largestImpact = 0;
+
+    // isOverlayNode filters out TurboWeb's own overlay subtree: the agent
+    // cursor, intent toast and flash are injected into the page and would
+    // otherwise inflate the counts (the same nodes the pixel diff masks).
+    function isOverlayNode(node) {
+      let el = node;
+      // Text/attribute mutations carry the affected element as .target;
+      // walk up to the document looking for the overlay host.
+      for (let i = 0; el && i < 30; i++) {
+        if (el.id === '__turbo_overlay_host') return true;
+        if (el.nodeType === Node.ELEMENT_NODE && el.hasAttribute &&
+            el.hasAttribute('data-turbo-overlay')) return true;
+        el = el.parentNode || (el.getRootNode && el.getRootNode().host);
+      }
+      return false;
+    }
+
+    // record folds one MutationRecord into the rolling counters, skipping
+    // overlay-originated records entirely.
+    function record(rec) {
+      if (isOverlayNode(rec.target)) return;
+      total.mutations++;
+      if (rec.type === 'childList') {
+        // addedNodes/removedNodes can themselves be overlay nodes.
+        for (const n of rec.addedNodes) {
+          if (!isOverlayNode(n)) total.added++;
+        }
+        for (const n of rec.removedNodes) {
+          if (!isOverlayNode(n)) total.removed++;
+        }
+        // Impact heuristic: a subtree-replacing childList mutation on a
+        // large element is the most informative "what changed" label.
+        const el = rec.target;
+        if (el && el.nodeType === Node.ELEMENT_NODE) {
+          const impact = (rec.addedNodes.length + rec.removedNodes.length);
+          if (impact > largestImpact) {
+            largestImpact = impact;
+            try { largestSubtree = sel(el); } catch { largestSubtree = ''; }
+          }
+        }
+      } else if (rec.type === 'attributes') {
+        total.attrs++;
+      } else if (rec.type === 'characterData') {
+        total.text++;
+      }
+    }
+
+    // Install one observer on the document root. Only the top frame runs
+    // the observer — cross-origin iframes are not observable anyway, which
+    // partial() reflects.
+    try {
+      const observer = new MutationObserver((records) => {
+        for (const rec of records) record(rec);
+      });
+      observer.observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true, characterData: true,
+      });
+    } catch {
+      // MutationObserver is universally available; if construction throws
+      // (extremely locked-down environment) the signal simply stays at 0.
+    }
+
+    // snapshot returns a copy of the current counters — the value stored
+    // behind a mark token.
+    function snapshot() {
+      return { ...total };
+    }
+
+    // partial reports whether the page has DOM the observer cannot see
+    // (cross-origin iframes), so a zero count must not suppress the pixel
+    // diff (§5 caveat).
+    function partial() {
+      try {
+        for (const f of document.querySelectorAll('iframe')) {
+          // Accessing contentDocument throws / returns null cross-origin.
+          if (!f.contentDocument) return true;
+        }
+      } catch {
+        return true;
+      }
+      return false;
+    }
+
+    // since computes the delta between now and a mark snapshot, packaging
+    // it in the shape the Go domSignal struct expects.
+    function since(mark) {
+      const base = mark || { mutations: 0, added: 0, removed: 0, attrs: 0, text: 0 };
+      return {
+        mutations: total.mutations - (base.mutations || 0),
+        added: total.added - (base.added || 0),
+        removed: total.removed - (base.removed || 0),
+        attrs: total.attrs - (base.attrs || 0),
+        text: total.text - (base.text || 0),
+        largest_subtree: largestSubtree,
+        partial: partial(),
+      };
+    }
+
+    // mark snapshots the counters and resets the impact tracker so the
+    // next window's largest_subtree reflects only post-mark mutations. The
+    // token IS the snapshot — encoded so it survives the JSON round trip.
+    function mark() {
+      largestSubtree = '';
+      largestImpact = 0;
+      return JSON.stringify(snapshot());
+    }
+
+    return { mark, since, snapshot };
+  })();
+
+  // domMutationsMark — content-script action: snapshot+reset the mutation
+  // counter and return an opaque token the verify call diffs against.
+  function domMutationsMark() {
+    return { token: domSignal.mark() };
+  }
+
+  // domMutationsSince — content-script action: return the mutation counts
+  // accumulated since the given mark token.
+  function domMutationsSince({ since } = {}) {
+    let mark = null;
+    if (typeof since === 'string' && since) {
+      try { mark = JSON.parse(since); } catch { mark = null; }
+    }
+    return domSignal.since(mark);
+  }
+
+  // screenshotDiffMeta — content-script action backing screenshot_diff's
+  // single metadata round trip: resolves the agent's `ignore` selectors to
+  // viewport bounding boxes, auto-adds the TurboWeb overlay box (so the
+  // animated cursor/toast never contaminate the pixel diff), and bundles
+  // the DOM-mutation summary since the baseline's mark.
+  function screenshotDiffMeta({ ignore, since } = {}) {
+    const masks = [];
+    // Resolve each ignore selector to its bounding box(es).
+    if (Array.isArray(ignore)) {
+      for (const selector of ignore) {
+        if (typeof selector !== 'string' || !selector) continue;
+        let els;
+        try { els = document.querySelectorAll(selector); } catch { continue; }
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            masks.push({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
+          }
+        }
+      }
+    }
+    // Auto-mask the overlay host: TurboWeb's own cursor/toast/flash move
+    // between captures and would diff as noise (§4.3). The host is a 0×0
+    // fixed element, but its shadow children paint across the viewport, so
+    // mask the regions the overlay can occupy: the top-right badge strip
+    // and a generous cursor margin. Cheapest correct option is to mask the
+    // overlay-occupied corner; the agent rarely cares about pixels there.
+    const host = document.getElementById('__turbo_overlay_host');
+    if (host) {
+      // Badge sits at top:12 right:12 — mask a conservative top strip.
+      masks.push({ x: 0, y: 0, w: window.innerWidth, h: 48 });
+    }
+    // Also auto-mask <video> and <canvas>: they differ frame-to-frame and
+    // produce no DOM mutations (§7), so excluding them avoids false
+    // positives. The agent can still opt in by not relying on this tool.
+    for (const el of document.querySelectorAll('video, canvas')) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        masks.push({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
+      }
+    }
+
+    let mark = null;
+    if (typeof since === 'string' && since) {
+      try { mark = JSON.parse(since); } catch { mark = null; }
+    }
+    return {
+      masks,
+      dom: domSignal.since(mark),
+      viewport: { w: window.innerWidth, h: window.innerHeight, scrollY: Math.round(window.scrollY) },
+      url: location.href,
+    };
+  }
+
   // --- Message router ---
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'ping') {
@@ -2231,6 +2426,9 @@
       execute_js_isolated: (p) => executeJS(p),
       inject_script: (p) => injectScript(p),
       drag_drop_file: (p) => dragDropFile(p),
+      dom_mutations_mark: () => domMutationsMark(),
+      dom_mutations_since: (p) => domMutationsSince(p),
+      screenshot_diff_meta: (p) => screenshotDiffMeta(p),
     };
 
     const handler = handlers[msg.action];

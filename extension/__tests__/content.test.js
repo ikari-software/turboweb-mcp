@@ -41,6 +41,7 @@ beforeAll(() => {
     'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
     'executeJS', 'injectScript',
     'dragDropFile', 'runDropInPage', '__turboPerformDrop',
+    'domMutationsMark', 'domMutationsSince', 'screenshotDiffMeta',
   ].join(', ');
 
   // Inject an export line right before the closing })(); so functions are accessible
@@ -1180,5 +1181,150 @@ describe('drag_drop_file', () => {
       null, sendResponse,
     );
     expect(r).toBe(true); // async handler
+  });
+});
+
+// ============================================================
+// DOM-mutation signal — domMutationsMark / domMutationsSince /
+// screenshotDiffMeta (the MutationObserver complement to the pixel diff)
+// ============================================================
+
+// flushMutations yields long enough for the MutationObserver callback —
+// which jsdom delivers on a microtask — to run.
+const flushMutations = () => new Promise((r) => setTimeout(r, 0));
+
+describe('dom_mutations signal', () => {
+  it('mark returns an opaque token', () => {
+    const { token } = api.domMutationsMark();
+    expect(typeof token).toBe('string');
+    expect(token.length).toBeGreaterThan(0);
+  });
+
+  it('counts childList additions since a mark', async () => {
+    const { token } = api.domMutationsMark();
+    document.body.appendChild(document.createElement('div'));
+    document.body.appendChild(document.createElement('span'));
+    await flushMutations();
+
+    const dom = api.domMutationsSince({ since: token });
+    expect(dom.mutations).toBeGreaterThan(0);
+    expect(dom.added).toBeGreaterThanOrEqual(2);
+  });
+
+  it('counts attribute mutations since a mark', async () => {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    await flushMutations();
+
+    const { token } = api.domMutationsMark();
+    el.setAttribute('data-x', '1');
+    el.setAttribute('data-y', '2');
+    await flushMutations();
+
+    const dom = api.domMutationsSince({ since: token });
+    expect(dom.attrs).toBeGreaterThanOrEqual(2);
+  });
+
+  it('reports zero mutations for a quiet window', async () => {
+    await flushMutations();
+    const { token } = api.domMutationsMark();
+    await flushMutations(); // nothing mutated
+
+    const dom = api.domMutationsSince({ since: token });
+    expect(dom.mutations).toBe(0);
+    expect(dom.added).toBe(0);
+  });
+
+  it('ignores mutations inside the TurboWeb overlay subtree', async () => {
+    // Simulate the overlay host the content script injects.
+    const host = document.createElement('div');
+    host.id = '__turbo_overlay_host';
+    document.body.appendChild(host);
+    await flushMutations();
+
+    const { token } = api.domMutationsMark();
+    // Mutating INSIDE the overlay must not count — the agent cursor and
+    // intent toast animate constantly and would otherwise inflate counts.
+    host.appendChild(document.createElement('div'));
+    host.appendChild(document.createElement('span'));
+    await flushMutations();
+
+    const dom = api.domMutationsSince({ since: token });
+    expect(dom.mutations).toBe(0);
+    expect(dom.added).toBe(0);
+  });
+
+  it('still counts real page mutations alongside ignored overlay ones', async () => {
+    const host = document.createElement('div');
+    host.id = '__turbo_overlay_host';
+    document.body.appendChild(host);
+    await flushMutations();
+
+    const { token } = api.domMutationsMark();
+    host.appendChild(document.createElement('i'));        // ignored
+    document.body.appendChild(document.createElement('p')); // real
+    await flushMutations();
+
+    const dom = api.domMutationsSince({ since: token });
+    expect(dom.added).toBe(1);
+  });
+});
+
+describe('screenshot_diff_meta', () => {
+  it('resolves ignore selectors to bounding boxes', () => {
+    document.body.innerHTML = '<div id="clock">12:00</div>';
+    const el = document.getElementById('clock');
+    mockRect(el, { x: 10, y: 20, width: 80, height: 30 });
+
+    const meta = api.screenshotDiffMeta({ ignore: ['#clock'] });
+    const clockMask = meta.masks.find((m) => m.x === 10 && m.y === 20);
+    expect(clockMask).toBeTruthy();
+    expect(clockMask.w).toBe(80);
+    expect(clockMask.h).toBe(30);
+  });
+
+  it('auto-masks the TurboWeb overlay strip', () => {
+    const host = document.createElement('div');
+    host.id = '__turbo_overlay_host';
+    document.body.appendChild(host);
+
+    const meta = api.screenshotDiffMeta({});
+    // A full-width top strip is masked so the cursor/toast never diff.
+    const strip = meta.masks.find((m) => m.y === 0 && m.w === window.innerWidth);
+    expect(strip).toBeTruthy();
+  });
+
+  it('auto-masks video and canvas elements', () => {
+    document.body.innerHTML = '<video></video><canvas></canvas>';
+    const vid = document.querySelector('video');
+    const cnv = document.querySelector('canvas');
+    mockRect(vid, { x: 0, y: 100, width: 320, height: 240 });
+    mockRect(cnv, { x: 400, y: 100, width: 200, height: 200 });
+
+    const meta = api.screenshotDiffMeta({});
+    expect(meta.masks.some((m) => m.w === 320 && m.h === 240)).toBe(true);
+    expect(meta.masks.some((m) => m.w === 200 && m.h === 200)).toBe(true);
+  });
+
+  it('bundles the DOM summary and viewport', async () => {
+    await flushMutations();
+    const { token } = api.domMutationsMark();
+    document.body.appendChild(document.createElement('div'));
+    await flushMutations();
+
+    const meta = api.screenshotDiffMeta({ since: token });
+    expect(meta.dom.mutations).toBeGreaterThan(0);
+    expect(meta.viewport.w).toBe(window.innerWidth);
+    expect(meta.viewport.h).toBe(window.innerHeight);
+    expect(typeof meta.url).toBe('string');
+  });
+
+  it('is reachable through the message router', async () => {
+    const sendResponse = vi.fn();
+    messageHandler({ action: 'screenshot_diff_meta', params: {} }, null, sendResponse);
+    expect(sendResponse).toHaveBeenCalled();
+    const arg = sendResponse.mock.calls[0][0];
+    expect(arg).toHaveProperty('masks');
+    expect(arg).toHaveProperty('dom');
   });
 });
