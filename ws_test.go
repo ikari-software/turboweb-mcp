@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // startTestWSServer creates a WebSocket test server using the real handleWSConnection.
@@ -619,6 +621,187 @@ func TestRelay_NoBrowsersViaRelay(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "No browser extension connected") {
 		t.Errorf("error = %q", err.Error())
+	}
+}
+
+// TestRelay_ConnectionStatusViaRelay guards the bug where connection_status
+// reported the browser disconnected in relay mode: handleConnectionStatus
+// inspected the relay client's own (empty) browsers map instead of asking the
+// daemon. It must now route through send() so the daemon answers.
+func TestRelay_ConnectionStatusViaRelay(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+
+	srv, wsURL := startTestDaemon(t)
+	defer srv.Close()
+
+	// Browser connects to the daemon (as it does in production).
+	conn := connectMockBrowser(t, wsURL, echoHandler)
+	defer conn.Close()
+
+	relayWS, _, err := websocket.DefaultDialer.Dial(wsURL+"/relay", nil)
+	if err != nil {
+		t.Fatalf("relay dial: %v", err)
+	}
+	defer relayWS.Close()
+
+	oldRelay := useRelay
+	oldConn := relayConn
+	defer func() {
+		useRelay = oldRelay
+		relayMu.Lock()
+		relayConn = oldConn
+		relayMu.Unlock()
+	}()
+
+	useRelay = true
+	relayMu.Lock()
+	relayConn = relayWS
+	relayMu.Unlock()
+
+	go func() {
+		for {
+			_, message, err := relayWS.ReadMessage()
+			if err != nil {
+				return
+			}
+			var msg struct {
+				ID     string          `json:"id"`
+				Result json.RawMessage `json:"result,omitempty"`
+				Error  string          `json:"error,omitempty"`
+			}
+			if json.Unmarshal(message, &msg) != nil || msg.ID == "" {
+				continue
+			}
+			pendingMu.Lock()
+			p, ok := pending[msg.ID]
+			if ok {
+				delete(pending, msg.ID)
+			}
+			pendingMu.Unlock()
+			if ok {
+				p.timer.Stop()
+				if msg.Error != "" {
+					p.errCh <- fmt.Errorf("%s", msg.Error)
+				} else {
+					p.resultCh <- msg.Result
+				}
+			}
+		}
+	}()
+
+	result, err := handleConnectionStatus(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handleConnectionStatus via relay: %v", err)
+	}
+	text := extractText(t, result)
+	var resp struct {
+		Connected      bool `json:"connected"`
+		Extension      bool `json:"extension"`
+		ExtensionCount int  `json:"extensionCount"`
+	}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("parse: %v\nraw: %s", err, text)
+	}
+	if !resp.Connected || !resp.Extension {
+		t.Errorf("connection_status via relay = %s, want connected+extension true", text)
+	}
+	if resp.ExtensionCount != 1 {
+		t.Errorf("extensionCount = %d, want 1", resp.ExtensionCount)
+	}
+}
+
+// TestConnectionStatus_DaemonLinkDown verifies connection_status degrades
+// gracefully: when the relay link to the daemon is down, it must return a
+// structured connected:false verdict (with an error note), never an MCP error.
+func TestConnectionStatus_DaemonLinkDown(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+
+	oldRelay := useRelay
+	oldConn := relayConn
+	oldBiDi := getBiDi()
+	defer func() {
+		useRelay = oldRelay
+		relayMu.Lock()
+		relayConn = oldConn
+		relayMu.Unlock()
+		setBiDi(oldBiDi)
+	}()
+
+	useRelay = true
+	relayMu.Lock()
+	relayConn = nil // daemon link down
+	relayMu.Unlock()
+	setBiDi(nil)
+
+	result, err := handleConnectionStatus(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handleConnectionStatus returned a Go error: %v", err)
+	}
+	if result.IsError {
+		t.Error("connection_status must not return an MCP error when the daemon link is down")
+	}
+	text := extractText(t, result)
+	var resp struct {
+		Connected bool   `json:"connected"`
+		Error     string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("parse: %v\nraw: %s", err, text)
+	}
+	if resp.Connected {
+		t.Error("connected should be false when the daemon link is down")
+	}
+	if resp.Error == "" {
+		t.Error("error field should explain why the status is unavailable")
+	}
+}
+
+// TestConnectionStatus_BiDiMergeOverDownLink verifies the BiDi merge: a
+// relay-process-owned BiDi session reports connected even when the daemon
+// link is down and the daemon-sourced status would say not-connected.
+func TestConnectionStatus_BiDiMergeOverDownLink(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+
+	oldRelay := useRelay
+	oldConn := relayConn
+	oldBiDi := getBiDi()
+	defer func() {
+		useRelay = oldRelay
+		relayMu.Lock()
+		relayConn = oldConn
+		relayMu.Unlock()
+		setBiDi(oldBiDi)
+	}()
+
+	useRelay = true
+	relayMu.Lock()
+	relayConn = nil // daemon link down — daemon-sourced status is unavailable
+	relayMu.Unlock()
+	setBiDi(&BiDiClient{}) // but this relay process owns a BiDi session
+
+	result, err := handleConnectionStatus(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handleConnectionStatus returned a Go error: %v", err)
+	}
+	text := extractText(t, result)
+	var resp struct {
+		Connected bool `json:"connected"`
+		BiDi      bool `json:"bidi"`
+	}
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("parse: %v\nraw: %s", err, text)
+	}
+	if !resp.Connected {
+		t.Error("connected should be true — a local BiDi session is active")
+	}
+	if !resp.BiDi {
+		t.Error("bidi should be true — a local BiDi session is active")
 	}
 }
 

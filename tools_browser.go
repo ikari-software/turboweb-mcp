@@ -85,21 +85,39 @@ func handleLaunchBrowser(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func handleConnectionStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	open := getOpenBrowsers()
-	names := make([]string, len(open))
-	for i, b := range open {
-		b.mu.Lock()
-		names[i] = b.name
-		b.mu.Unlock()
+	// Browser extensions connect to the daemon, not to this relay process, so
+	// this process's own browsers map is empty in relay mode. Route through
+	// send() — sendDirect/sendViaRelay land on the daemon, which answers from
+	// its real browser WebSocket state. Cap the timeout: connection_status is
+	// purely diagnostic, so it must not inherit the 30s default and stall an
+	// agent waiting on a wedged daemon.
+	raw, err := send("connection_status", nil, 3000)
+	var status map[string]any
+	switch {
+	case err != nil:
+		// connection_status is a diagnostic tool — it must always return a
+		// parseable verdict, never an MCP error. A failed send() means the
+		// relay link to the daemon is down or too slow; report not-connected
+		// with the reason rather than making the agent handle a tool error.
+		status = map[string]any{
+			"connected": false, "extension": false, "bidi": false,
+			"error": err.Error(),
+		}
+	case json.Unmarshal(raw, &status) != nil:
+		status = map[string]any{
+			"connected": false, "extension": false, "bidi": false,
+			"error": "malformed connection_status response from daemon",
+		}
 	}
-	return textResult(map[string]any{
-		"connected":      len(open) > 0 || getBiDi() != nil,
-		"extension":      len(open) > 0,
-		"bidi":           getBiDi() != nil,
-		"browsers":       names,
-		"extensionCount": len(open),
-		"wsPort":         wsPort,
-	})
+	// BiDi can be owned by whichever process launched the browser — the
+	// daemon, or this relay process if an agent called launch_browser here.
+	// Merge the local view so a relay-owned BiDi session still counts, even
+	// when the daemon link is down.
+	if getBiDi() != nil {
+		status["bidi"] = true
+		status["connected"] = true
+	}
+	return textResult(status)
 }
 
 func handleListTabs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -76,11 +76,15 @@ func TestHandleConnectionStatus_WithBrowser(t *testing.T) {
 		text := extractText(t, result)
 		var resp struct {
 			Connected      bool `json:"connected"`
+			Extension      bool `json:"extension"`
 			ExtensionCount int  `json:"extensionCount"`
 		}
 		json.Unmarshal([]byte(text), &resp)
 		if !resp.Connected {
 			t.Error("should be connected")
+		}
+		if !resp.Extension {
+			t.Error("extension should be true")
 		}
 		if resp.ExtensionCount != 1 {
 			t.Errorf("extensionCount = %d, want 1", resp.ExtensionCount)

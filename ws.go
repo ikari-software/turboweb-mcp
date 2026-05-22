@@ -553,6 +553,29 @@ func getOpenBrowsers() []*BrowserConnection {
 	return open
 }
 
+// connectionStatusJSON reports the calling process's view of browser
+// connectivity. It must run in the process that actually owns the browser
+// WebSockets — the daemon — so connection_status routes here through send()
+// rather than reading a relay client's (always-empty) browsers map.
+func connectionStatusJSON() json.RawMessage {
+	open := getOpenBrowsers()
+	names := make([]string, len(open))
+	for i, b := range open {
+		b.mu.Lock()
+		names[i] = b.name
+		b.mu.Unlock()
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"connected":      len(open) > 0 || getBiDi() != nil,
+		"extension":      len(open) > 0,
+		"bidi":           getBiDi() != nil,
+		"browsers":       names,
+		"extensionCount": len(open),
+		"wsPort":         wsPort,
+	})
+	return raw
+}
+
 // --- Send functions ---
 
 // sendTo sends a command to a specific browser and waits for the response.
@@ -663,6 +686,14 @@ func send(action string, params map[string]any, timeoutMs ...int) (json.RawMessa
 
 // sendDirect routes a command directly to browsers (daemon mode or in-process fallback).
 func sendDirect(action string, params map[string]any, timeout int) (json.RawMessage, error) {
+	// connection_status is answered by this process, not forwarded to a
+	// browser — the extension has no such command. Handled here (before the
+	// "no browser connected" error path) so a relay client's connection_status
+	// reaches the daemon, where the browser WebSockets actually live.
+	if action == "connection_status" {
+		return connectionStatusJSON(), nil
+	}
+
 	// Ensure every outgoing command carries client-attribution metadata so the
 	// extension popup can attribute it. The relay handler may have already
 	// attached _clientLabel; only fill it from our session if absent.
