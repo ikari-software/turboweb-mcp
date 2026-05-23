@@ -2,6 +2,12 @@ BINARY = turboweb-mcp-by-ikari
 VERSION = 1.6.0
 GITHUB_REPO = ikari-software/turboweb-mcp
 
+# Install prefix — defaults to the Homebrew prefix when `brew` is on PATH
+# (so installs land in /opt/homebrew/bin on Apple Silicon and
+# /usr/local/bin on Intel macs and Linux), and otherwise falls back to
+# /usr/local. Override with `make install PREFIX=/path`.
+PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
+
 .PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
@@ -17,8 +23,10 @@ build: extension
 	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force bin/$(BINARY) >/dev/null 2>&1; fi
 
 install: build
-	cp bin/$(BINARY) /usr/local/bin/
-	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force /usr/local/bin/$(BINARY) >/dev/null 2>&1; fi
+	mkdir -p $(PREFIX)/bin
+	cp bin/$(BINARY) $(PREFIX)/bin/
+	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force $(PREFIX)/bin/$(BINARY) >/dev/null 2>&1; fi
+	@echo "installed: $(PREFIX)/bin/$(BINARY)"
 
 # `make release` produces every artifact a GitHub release should ship into
 # dist/:
