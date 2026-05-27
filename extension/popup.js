@@ -34,6 +34,54 @@ document.getElementById('ver').textContent = 'MCP v' + chrome.runtime.getManifes
 // Request current state
 port.postMessage({ type: 'getState' });
 
+// ── Adaptive toolbar icon (Chrome only) ───────────────────────────────
+// Firefox uses manifest theme_icons for automatic light/dark icon
+// switching — no JS needed there.  Chrome has no equivalent, so we
+// rasterise the SVG at each required size onto a canvas and push the
+// ImageData via chrome.action.setIcon when the popup opens, repeating
+// whenever the OS colour scheme changes while the popup is open.
+// Calling setIcon without a tabId sets the persistent default for all
+// tabs; it survives the popup closing and stays correct until the next
+// open flips it again.
+(function syncActionIcon() {
+  if (typeof browser !== 'undefined') return; // Firefox: theme_icons covers it
+
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+
+  function apply(dark) {
+    if (dark) {
+      // Restore manifest defaults (dark PNGs) in case we swapped earlier.
+      chrome.action.setIcon({ path: {
+        16: 'icons/app-icon-16.png',
+        32: 'icons/app-icon-32.png',
+        48: 'icons/app-icon-48.png',
+        128: 'icons/app-icon-128.png',
+      }});
+      return;
+    }
+    // Light mode: draw the SVG into a canvas at each size and hand
+    // the pixel data to the browser.  A single Image load is reused
+    // across all four sizes so we only hit the SVG parser once.
+    const img = new Image();
+    img.onload = () => {
+      const imageData = {};
+      for (const size of [16, 32, 48, 128]) {
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, size, size);
+        imageData[size] = ctx.getImageData(0, 0, size, size);
+      }
+      chrome.action.setIcon({ imageData });
+    };
+    img.src = chrome.runtime.getURL('icons/app-icon-light.svg');
+  }
+
+  apply(mq.matches);
+  mq.addEventListener('change', (e) => apply(e.matches));
+})();
+
 document.getElementById('filter').addEventListener('input', (e) => {
   filterText = e.target.value.trim().toLowerCase();
   rerenderLog();

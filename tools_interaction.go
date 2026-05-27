@@ -13,10 +13,24 @@ func registerInteractionTools(s *server.MCPServer) {
 	// --- click ---
 	addTool(s,
 		mcp.NewTool("click",
-			mcp.WithDescription("Click an element by CSS selector OR x,y coordinates. Dispatches mousedown, mouseup, click events."),
-			mcp.WithString("selector", mcp.Description("CSS selector of element to click")),
-			mcp.WithNumber("x", mcp.Description("X coordinate to click")),
-			mcp.WithNumber("y", mcp.Description("Y coordinate to click")),
+			mcp.WithDescription(
+				"Click an element. Prefer selector over coordinates — selectors are "+
+					"stable across scrolls and reflows. Use x,y only when a selector "+
+					"isn't available (canvas, dynamic overlay, etc.).\n\n"+
+					"CSS selector tips:\n"+
+					"  • button text:   button:has(> span:contains(\"Submit\")) or button[aria-label=\"…\"]\n"+
+					"  • input by name: input[name=\"fieldname\"] — brackets in quoted values are valid CSS\n"+
+					"  • input by placeholder: input[placeholder=\"Email address\"]\n"+
+					"  • nth of type:   li:nth-of-type(3)\n\n"+
+					"Coordinates (x, y) are viewport-relative — same system as page_yaml positions. "+
+					"Elements scrolled off-screen are not clickable at their reported coordinates; "+
+					"scroll first, then click.\n\n"+
+					"Dispatches full pointer+mouse event sequence and focuses the nearest focusable "+
+					"ancestor. Use cdp_click for isTrusted-guarded handlers (MUI dropdowns, etc.).",
+			),
+			mcp.WithString("selector", mcp.Description("CSS selector of element to click. Preferred over x,y.")),
+			mcp.WithNumber("x", mcp.Description("X viewport coordinate (use when no selector applies)")),
+			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (pair with x)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
 		passThrough("click"),
@@ -154,6 +168,31 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
 		handlePrepareForUserClick,
+	)
+
+	// --- fill_input ---
+	addTool(s,
+		mcp.NewTool("fill_input",
+			mcp.WithDescription(
+				"Fill a form field (input, textarea, or select) with a value. "+
+					"React-compatible: uses the native prototype value setter so React's "+
+					"change-tracker sees a delta, then dispatches input+change events.\n\n"+
+					"Automatically prefers the visible element when a selector matches "+
+					"multiple elements (e.g. two inputs sharing the same name= attribute). "+
+					"Returns {filled, value, id} and a note when hidden duplicates were skipped.\n\n"+
+					"Use this instead of type_text for <input>/<textarea>/<select>. "+
+					"For contenteditable rich-text editors (CKEditor, Quill, ProseMirror), "+
+					"use type_text or execute_js with the editor's own API.",
+			),
+			mcp.WithString("selector", mcp.Required(), mcp.Description(
+				"CSS selector for the field. Prefer ID selectors (#field-id) when available. "+
+					"input[name=\"fieldname\"] works but may match hidden duplicates on pages "+
+					"with multiple form variants — the tool picks the visible one automatically.",
+			)),
+			mcp.WithString("value", mcp.Required(), mcp.Description("Value to set in the field.")),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		passThrough("fill_input"),
 	)
 }
 

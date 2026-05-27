@@ -762,10 +762,40 @@ async function screenshot(tabId, maxWidth = 1280, quality = 70) {
   await chrome.tabs.update(tid, { active: true });
   await new Promise(r => setTimeout(r, SCREENSHOT_FOCUS_DELAY_MS));
 
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: 'jpeg',
-    quality: Math.min(quality + 10, 100),
-  });
+  const captureOpts = { format: 'jpeg', quality: Math.min(quality + 10, 100) };
+
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
+  } catch (captureErr) {
+    // First failure: the tab may not have been fully painted yet (common in
+    // Firefox/Zen where the rendering pipeline needs longer after activation).
+    // Retry once after an extra 300 ms before escalating.
+    let retryDataUrl;
+    try {
+      await new Promise(r => setTimeout(r, 300));
+      retryDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
+    } catch {
+      retryDataUrl = null;
+    }
+
+    if (retryDataUrl) {
+      dataUrl = retryDataUrl;
+    } else if (chrome?.debugger) {
+      // Chrome headless/CI: captureVisibleTab requires an OS-focused window
+      // ("Missing activeTab permission").  CDP Page.captureScreenshot captures
+      // the rendering surface directly without that constraint.
+      try {
+        const cdp = await cdpSend(tid, 'Page.captureScreenshot', captureOpts);
+        dataUrl = 'data:image/jpeg;base64,' + cdp.data;
+      } catch {
+        throw captureErr; // CDP also failed — surface the original error
+      }
+    } else {
+      // Firefox: chrome.debugger not available — nothing left to try.
+      throw captureErr;
+    }
+  }
 
   let result;
   if (await checkNative()) {
@@ -1089,6 +1119,17 @@ async function dispatch(action, params) {
     // ANTHROPIC_API_KEY still get question-answering on tool results.
     case '__ask_local':
       return await askLocal(params);
+
+    // --- Cookies (CDP fallback when BiDi is not connected) ---
+    case 'get_cookies': {
+      const tid = await resolveTab(params.tabId);
+      const tab = await chrome.tabs.get(tid);
+      // Network.getCookies scoped to the page URL — returns only the cookies
+      // relevant to the current page rather than the whole browser profile.
+      const urls = tab.url ? [tab.url] : undefined;
+      const res = await cdpSend(tid, 'Network.getCookies', urls ? { urls } : {});
+      return { cookies: res.cookies || [] };
+    }
 
     default:
       throw new Error('Unknown action: ' + action);

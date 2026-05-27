@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!--
+    TurboWeb MCP light-theme toolbar icon.
+    Same brand identity as the dark PNG (amber cursor + robot badge),
+    but drawn with a dark stroke for contrast on white/light toolbars.
+  -->
+
+  <!-- Cursor arrow body — amber fill, deep-brown stroke for white-bg contrast -->
+  <path d="M 14,14 L 14,80 L 36,60 L 50,96 L 67,88 L 53,54 L 80,54 Z"
+        fill="#d29922"
+        stroke="#6b3e00"
+        stroke-width="5"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+
+  <!-- Robot badge: dark circle provides its own contrast against any background -->
+  <circle cx="91" cy="38" r="27"
+          fill="#1f2328"
+          stroke="#d29922"
+          stroke-width="3.5"/>
+
+  <!-- Robot face outline -->
+  <rect x="79" y="30" width="24" height="16" rx="4"
+        fill="none"
+        stroke="#d29922"
+        stroke-width="2.5"/>
+
+  <!-- Robot eyes -->
+  <circle cx="85" cy="38" r="3" fill="#d29922"/>
+  <circle cx="97" cy="38" r="3" fill="#d29922"/>
+
+  <!-- Antenna -->
+  <line x1="91" y1="30" x2="91" y2="23"
+        stroke="#d29922"
+        stroke-width="2.5"
+        stroke-linecap="round"/>
+  <circle cx="91" cy="21" r="3.5" fill="#d29922"/>
+</svg>

@@ -17,12 +17,23 @@ import (
 
 const wsPort = 18321
 
+// jsBrowserFingerprint is evaluated via execute_js on each connected tab to
+// identify the browser brand.  Zen Browser is a Firefox fork whose
+// navigator.userAgent is a stock Firefox string — "Zen" never appears in it —
+// so we probe window.zen (a global Zen exposes in content contexts) and prefix
+// "Zen/" onto the UA when found, giving the switch below a token to match on.
+const jsBrowserFingerprint = `(function(){` +
+	`var ua=navigator.userAgent;` +
+	`try{if(typeof window.zen!=='undefined')return 'Zen/'+ua;}catch(e){}` +
+	`return ua;` +
+	`})()`
+
 // BrowserConnection represents a connected Chrome/Arc/Brave/Edge extension.
 type BrowserConnection struct {
 	conn   *websocket.Conn
 	name   string
-	tabIDs map[int]struct{}
-	mu     sync.Mutex // protects conn writes
+	tabIDs map[int]bool // tabID -> isActive (true when that tab is the focused one)
+	mu     sync.Mutex  // protects conn writes
 }
 
 type pendingRequest struct {
@@ -474,8 +485,39 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 	bc := &BrowserConnection{
 		conn:   conn,
 		name:   fmt.Sprintf("browser-%d", len(browsers)+1),
-		tabIDs: make(map[int]struct{}),
+		tabIDs: make(map[int]bool),
 	}
+	// Detect browser name eagerly — before list_tabs is called — so it's
+	// available in connection_status and in sendToTab disambiguation.
+	go func() {
+		raw, err := sendTo(bc, "execute_js", map[string]any{"code": jsBrowserFingerprint}, 3000)
+		if err != nil {
+			return
+		}
+		var resp struct {
+			Result string `json:"result"`
+		}
+		if json.Unmarshal(raw, &resp) != nil {
+			return
+		}
+		ua := resp.Result
+		bc.mu.Lock()
+		switch {
+		case contains(ua, "Zen"):
+			bc.name = "Zen"
+		case contains(ua, "Arc"):
+			bc.name = "Arc"
+		case contains(ua, "Brave"):
+			bc.name = "Brave"
+		case contains(ua, "Edg"):
+			bc.name = "Edge"
+		case contains(ua, "Firefox"):
+			bc.name = "Firefox"
+		case contains(ua, "Chrome"):
+			bc.name = "Chrome"
+		}
+		bc.mu.Unlock()
+	}()
 
 	browsersMu.Lock()
 	browsers[conn] = bc
@@ -787,14 +829,16 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 			var tabs []json.RawMessage
 			if json.Unmarshal(raw, &tabs) == nil {
 				results[i] = result{tabs: tabs}
-				// Cache tab IDs
+				// Cache tab IDs with active state for disambiguation
+				// when multiple browsers share the same tab ID.
 				for _, t := range tabs {
 					var tab struct {
-						ID int `json:"id"`
+						ID     int  `json:"id"`
+						Active bool `json:"active"`
 					}
 					if json.Unmarshal(t, &tab) == nil {
 						bc.mu.Lock()
-						bc.tabIDs[tab.ID] = struct{}{}
+						bc.tabIDs[tab.ID] = tab.Active
 						bc.mu.Unlock()
 					}
 				}
@@ -803,10 +847,14 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 	}
 	wg.Wait()
 
-	// Detect browser names
+	// Refresh browser names in case the on-connect goroutine hasn't resolved yet.
 	for _, bc := range open {
 		go func(bc *BrowserConnection) {
-			raw, err := sendTo(bc, "execute_js", map[string]any{"code": "navigator.userAgent"}, 3000)
+			bc.mu.Lock()
+			alreadyNamed := bc.name != "" && bc.name != "Chrome" // "Chrome" is the default fallback
+			_ = alreadyNamed
+			bc.mu.Unlock()
+			raw, err := sendTo(bc, "execute_js", map[string]any{"code": jsBrowserFingerprint}, 3000)
 			if err != nil {
 				return
 			}
@@ -817,12 +865,16 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 				ua := resp.Result
 				bc.mu.Lock()
 				switch {
+				case contains(ua, "Zen"):
+					bc.name = "Zen"
 				case contains(ua, "Arc"):
 					bc.name = "Arc"
 				case contains(ua, "Brave"):
 					bc.name = "Brave"
 				case contains(ua, "Edg"):
 					bc.name = "Edge"
+				case contains(ua, "Firefox"):
+					bc.name = "Firefox"
 				case contains(ua, "Chrome"):
 					bc.name = "Chrome"
 				}
@@ -841,17 +893,29 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 }
 
 // sendToTab routes a command to the browser that owns the given tab ID.
+// When multiple browsers have the same tab ID cached (common with multi-window
+// setups like Zen), the browser whose tab is currently active wins.
 func sendToTab(open []*BrowserConnection, tabID int, action string, params map[string]any, timeout int) (json.RawMessage, error) {
-	// Check cached ownership
+	// Check cached ownership — prefer the browser where this tab is active.
+	var candidate *BrowserConnection
 	for _, bc := range open {
 		bc.mu.Lock()
-		_, owns := bc.tabIDs[tabID]
+		isActive, owns := bc.tabIDs[tabID]
 		bc.mu.Unlock()
 		if owns {
-			return sendTo(bc, action, params, timeout)
+			if isActive {
+				candidate = bc
+				break // active tab wins immediately; no need to check further
+			}
+			if candidate == nil {
+				candidate = bc // keep as fallback if no active one is found
+			}
 		}
 	}
-	// Not cached — try each browser
+	if candidate != nil {
+		return sendTo(candidate, action, params, timeout)
+	}
+	// Not cached — try each browser; first success wins.
 	for _, bc := range open {
 		result, err := sendTo(bc, action, params, timeout)
 		if err != nil {
@@ -861,7 +925,7 @@ func sendToTab(open []*BrowserConnection, tabID int, action string, params map[s
 			return nil, err
 		}
 		bc.mu.Lock()
-		bc.tabIDs[tabID] = struct{}{}
+		bc.tabIDs[tabID] = false // cache ownership; active state unknown until next list_tabs
 		bc.mu.Unlock()
 		return result, nil
 	}

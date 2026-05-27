@@ -74,6 +74,16 @@ function build() {
       // since the extension is browser-agnostic.
       m.name = 'TurboWeb MCP by ikari';
       m.action.default_title = 'TurboWeb MCP by ikari';
+      // Adaptive toolbar icon: Firefox automatically serves the light-mode SVG
+      // when the browser has a light theme (e.g. Zen in light mode), and the
+      // dark-mode PNGs otherwise.  Chrome has no equivalent; the dark PNGs
+      // remain the default there and are still visible on light toolbars.
+      m.action.theme_icons = [
+        { light: 'icons/app-icon-light.svg', dark: 'icons/app-icon-16.png',  size: 16  },
+        { light: 'icons/app-icon-light.svg', dark: 'icons/app-icon-32.png',  size: 32  },
+        { light: 'icons/app-icon-light.svg', dark: 'icons/app-icon-48.png',  size: 48  },
+        { light: 'icons/app-icon-light.svg', dark: 'icons/app-icon-128.png', size: 128 },
+      ];
       // Explicit CSP: under its default extension policy Firefox upgrades
       // ws://127.0.0.1 → wss:// for extension pages, which the local daemon
       // (plain ws://, no TLS) can't answer — the connection just fails.

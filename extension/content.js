@@ -318,6 +318,27 @@
       items.push(item);
     }
 
+    // Fix 3: detect inputs whose name= is shared with hidden siblings.
+    // When name= matches multiple elements (e.g. an ebook field and a
+    // hidden print-book field), querySelector returns the wrong one.
+    // Annotate visible items so the agent prefers the ID selector.
+    const nameSiblings = {};
+    for (const el of document.querySelectorAll('input[name],textarea[name],select[name]')) {
+      const n = el.name;
+      if (!nameSiblings[n]) nameSiblings[n] = { total: 0, hidden: 0 };
+      nameSiblings[n].total++;
+      if (el.offsetParent === null) nameSiblings[n].hidden++;
+    }
+    for (const item of items) {
+      if (item.name) {
+        const s = nameSiblings[item.name];
+        if (s && s.hidden > 0) {
+          item.duplicateName = `⚠ ${s.total} elements share name="${item.name}", `
+            + `${s.hidden} hidden — use id selector (e.g. #${item.selector.replace(/^.*#/, '') || '…'}) to avoid targeting the wrong one`;
+        }
+      }
+    }
+
     return { viewport: viewport(), elements: items };
   }
 
@@ -493,12 +514,34 @@
     };
   }
 
+  // Resolve a CSS selector preferring the first visible match when multiple
+  // elements share it (e.g. two inputs with the same name= attribute — one
+  // visible, one hidden in a collapsed section). "Visible" = offsetParent !== null.
+  // Throws a descriptive error listing element IDs when every match is hidden,
+  // so the caller knows to switch to an ID selector instead (Fix 1 + Fix 4).
+  function resolveVisible(selector) {
+    const matches = Array.from(document.querySelectorAll(selector));
+    if (!matches.length) throw new Error('Element not found: ' + selector);
+    const visible = matches.filter(el => el.offsetParent !== null);
+    if (visible.length) {
+      return { el: visible[0], allCount: matches.length, hiddenSkipped: matches.length - visible.length };
+    }
+    // All matches are hidden — surface their IDs so the caller can be specific
+    const ids = matches.map(e => e.id ? '#' + e.id : `<${e.tagName.toLowerCase()}[name="${e.name || ''}"]>`).join(', ');
+    throw new Error(
+      `Selector "${selector}" matched ${matches.length} element(s) but all are hidden ` +
+      `(offsetParent=null). Use an ID selector to target the visible one. Found: ${ids}`
+    );
+  }
+
   // --- Click ---
   function clickElement({ selector, x, y }) {
     let el;
+    let selectorNote = null;
     if (selector) {
-      el = document.querySelector(selector);
-      if (!el) throw new Error('Element not found: ' + selector);
+      const { el: resolved, hiddenSkipped } = resolveVisible(selector);
+      el = resolved;
+      if (hiddenSkipped > 0) selectorNote = `Skipped ${hiddenSkipped} hidden duplicate(s) — used ${el.id ? '#' + el.id : sel(el)}`;
     } else if (x !== undefined && y !== undefined) {
       el = document.elementFromPoint(x, y);
       if (!el) throw new Error(`No element at (${x}, ${y})`);
@@ -537,6 +580,7 @@
 
     const focused = document.activeElement === focusable && focusable !== document.body;
     const out = { clicked: sel(el), x: Math.round(cx), y: Math.round(cy), focused };
+    if (selectorNote) out.note = selectorNote;
 
     // Hint when synthetic clicks tend to misfire — most often because the
     // page uses <a href="javascript:..."> (CSP blocks the navigation) or
@@ -636,8 +680,15 @@
 
   // --- Type text ---
   function typeText({ selector, text, clear = false, pressEnter = false }) {
-    const el = selector ? document.querySelector(selector) : document.activeElement;
-    if (!el) throw new Error('Element not found: ' + (selector || 'activeElement'));
+    let el, selectorNote = null;
+    if (selector) {
+      const { el: resolved, hiddenSkipped } = resolveVisible(selector);
+      el = resolved;
+      if (hiddenSkipped > 0) selectorNote = `Skipped ${hiddenSkipped} hidden duplicate(s) — typed into ${el.id ? '#' + el.id : sel(el)}`;
+    } else {
+      el = document.activeElement;
+      if (!el) throw new Error('No active element to type into');
+    }
 
     el.focus();
 
@@ -685,6 +736,7 @@
       verified = clear ? el.value === text : el.value.includes(text);
     }
     const out = { typed: text.length, verified, element: sel(el) };
+    if (selectorNote) out.note = selectorNote;
     if (isField) {
       out.value = el.value;
       if (!verified) {
@@ -692,6 +744,50 @@
           + 'maxlength, reject this input type, or be inside an iframe. '
           + 'Check page_capabilities, or retry with cdp_type (trusted input).';
       }
+    }
+    return out;
+  }
+
+  // --- Fill input (React-compatible form fill) ---
+  // Resolves the visible element when a selector matches multiple (Fix 1),
+  // uses the native prototype value setter so React's change-tracker sees a
+  // delta, dispatches input+change events, and verifies the value stuck.
+  // Works for <input>, <textarea>, and <select>. Use type_text for
+  // contenteditable hosts (CKEditor, Quill, etc.).
+  function fillInput({ selector, value }) {
+    const { el, hiddenSkipped } = resolveVisible(selector);
+    const tag = el.tagName;
+    if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+      throw new Error(
+        `fill_input: <${tag.toLowerCase()}> is not a form field. ` +
+        `Use type_text for contenteditable, or click for buttons.`
+      );
+    }
+
+    el.focus();
+
+    if (tag === 'SELECT') {
+      el.value = value;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      const stuck = el.value === value;
+      const out = { filled: stuck, selector: sel(el), id: el.id || null, value: el.value };
+      if (hiddenSkipped > 0) out.note = `Skipped ${hiddenSkipped} hidden duplicate(s) — filled ${el.id ? '#' + el.id : sel(el)}`;
+      return out;
+    }
+
+    const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    nativeSetter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const stuck = el.value === value;
+    const out = { filled: stuck, selector: sel(el), id: el.id || null, value: el.value };
+    if (hiddenSkipped > 0) out.note = `Skipped ${hiddenSkipped} hidden duplicate(s) — filled ${el.id ? '#' + el.id : sel(el)}`;
+    if (!stuck) {
+      out.hint =
+        `Value did not stick — the field may be disabled, capped by maxlength, ` +
+        `or reject this input type. Current value: "${el.value}".`;
     }
     return out;
   }
@@ -782,7 +878,14 @@
     function isVisible(el) {
       if (!visibleOnly) return true;
       const st = getComputedStyle(el);
-      return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+      if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
+      // Also require the element to overlap the current viewport — elements
+      // scrolled above/below the fold have negative or oversized y values and
+      // can't be clicked without scrolling first, which makes their coordinates
+      // confusing. Pass visibleOnly=false to include off-screen elements.
+      const r = el.getBoundingClientRect();
+      return r.bottom > 0 && r.top < window.innerHeight &&
+             r.right > 0 && r.left < window.innerWidth;
     }
 
     function directText(el) {
@@ -1916,7 +2019,7 @@
     function actionPalette(action) {
       switch (action) {
         case 'type_text': case 'cdp_type': case 'cdp_key': case 'set_input_files':
-        case 'drag_drop_file':
+        case 'fill_input': case 'drag_drop_file':
           return { ring: '#58a6ff', fill: 'rgba(88, 166, 255, 0.55)',  glow: 'rgba(88, 166, 255, 0.55)' };
         case 'scroll': case 'cdp_scroll':
           return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.45)',   glow: 'rgba(63, 185, 80, 0.5)'   };
@@ -2341,7 +2444,7 @@
           return { x: params.x, y: params.y };
         }
       }
-      if (action === 'type_text' && params.selector) {
+      if ((action === 'type_text' || action === 'fill_input') && params.selector) {
         const el = document.querySelector(params.selector);
         if (el) {
           const r = el.getBoundingClientRect();
@@ -2827,6 +2930,7 @@
       click: (p) => clickElement(p),
       prepare_for_user_click: (p) => prepareForUserClick(p),
       type_text: (p) => typeText(p),
+      fill_input: (p) => fillInput(p),
       scroll: (p) => scrollPage(p),
       get_html: (p) => getHTML(p),
       get_page_structure: (p) => getPageStructure(p),

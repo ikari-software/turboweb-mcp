@@ -3,19 +3,77 @@
 <head>
 <meta charset="utf-8">
 <style>
+  /* ── Colour tokens ────────────────────────────────────────────────────
+     All rules below reference these variables only — no raw hex colours.
+     The light-mode block overrides every token; nothing else changes.  */
+  :root {
+    --bg-0:      #0d1117;   /* page / body background                   */
+    --bg-1:      #161b22;   /* elevated surface — cards, inputs, hover  */
+    --bg-2:      #010409;   /* sunken surface — log, client list        */
+    --fg-0:      #c9d1d9;   /* primary text                             */
+    --fg-1:      #8b949e;   /* secondary text                           */
+    --fg-2:      #484f58;   /* muted / section labels                   */
+    --fg-3:      #6e7681;   /* very muted                               */
+    --border:    #21262d;
+    --scrollbar: #30363d;
+    --accent:    #58a6ff;   /* blue — links, spinners, actions          */
+    --success:   #3fb950;   /* green — connected dot                    */
+    --error:     #f85149;   /* red — disconnected, errors               */
+    --warn:      #d29922;   /* amber — slow commands                    */
+    --tag-bg:    #21262d;
+    --tag-fg:    #8b949e;
+    --claude-bg: #4f3a17;
+    --claude-fg: #d29922;
+    --ide-bg:    #1f3a4f;
+    --ide-fg:    #58a6ff;
+    /* Dynamic agent-hue chips — lightness values tuned per theme */
+    --chip-bg-l: 18%;
+    --chip-fg-l: 56%;
+    --client-fg-l: 56%;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg-0:      #ffffff;
+      --bg-1:      #f6f8fa;
+      --bg-2:      #f6f8fa;
+      --fg-0:      #1f2328;
+      --fg-1:      #57606a;
+      --fg-2:      #6e7781;
+      --fg-3:      #8c959f;
+      --border:    #d0d7de;
+      --scrollbar: #afb8c1;
+      --accent:    #0969da;
+      --success:   #1a7f37;
+      --error:     #cf222e;
+      --warn:      #9a6700;
+      --tag-bg:    #eaeef2;
+      --tag-fg:    #57606a;
+      --claude-bg: #fff8e6;
+      --claude-fg: #9a6700;
+      --ide-bg:    #ddf4ff;
+      --ide-fg:    #0969da;
+      /* In light mode lighten chip backgrounds and darken text */
+      --chip-bg-l: 88%;
+      --chip-fg-l: 32%;
+      --client-fg-l: 38%;
+    }
+  }
+
+  /* ── Reset & base ─────────────────────────────────────────────────── */
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* color-scheme: light dark — tells Firefox/Zen to paint the popup frame
+     to match the active theme, eliminating the white border in Zen dark mode. */
+  html { background: var(--bg-0); color-scheme: light dark; }
   body {
     width: 460px;
     min-height: 480px;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
     font-size: 11px;
-    background: #0d1117;
-    color: #c9d1d9;
+    background: var(--bg-0);
+    color: var(--fg-0);
     padding: 12px;
     overflow-x: hidden;
   }
-  /* When loaded as a popped-out chrome.windows.create window, fill the
-     whole window and make the activity log expand with available height. */
   body.windowed {
     width: 100vw;
     min-height: 100vh;
@@ -25,46 +83,69 @@
   }
   body.windowed .section.log-section { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   body.windowed .log { flex: 1; min-height: 0; max-height: none; }
+
+  /* ── Header ───────────────────────────────────────────────────────── */
   .header {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-bottom: 10px;
     padding-bottom: 8px;
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid var(--border);
   }
   .bolt { font-size: 16px; }
-  .header h1 { font-size: 13px; font-weight: 700; color: #58a6ff; letter-spacing: 0.5px; }
-  .header .ver { font-size: 9px; color: #484f58; margin-left: auto; }
+  .header h1 { font-size: 13px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
+  .header .ver { font-size: 9px; color: var(--fg-2); margin-left: auto; }
+  /* Moved out of inline style so it inherits theme tokens */
+  .popout-btn {
+    margin-left: 6px;
+    background: var(--bg-1);
+    color: var(--fg-1);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font: 10px/1 inherit;
+    cursor: pointer;
+  }
+  .popout-btn:hover { background: var(--border); color: var(--fg-0); }
 
+  /* ── Status bar ───────────────────────────────────────────────────── */
   .status-bar {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    background: #161b22;
-    border: 1px solid #21262d;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
     border-radius: 6px;
     margin-bottom: 10px;
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #f85149; flex-shrink: 0; }
-  .dot.on { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--error); flex-shrink: 0; }
+  .dot.on {
+    background: var(--success);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--success) 40%, transparent);
+  }
   .dot.on.pulse { animation: pulse 2s infinite; }
-  @keyframes pulse { 0%, 100% { box-shadow: 0 0 4px #3fb95044; } 50% { box-shadow: 0 0 10px #3fb950aa; } }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 4px  color-mix(in srgb, var(--success) 27%, transparent); }
+    50%       { box-shadow: 0 0 10px color-mix(in srgb, var(--success) 67%, transparent); }
+  }
   .status-text { flex: 1; min-width: 0; }
-  .status-text .label { color: #8b949e; font-size: 10px; }
-  .browsers-list { color: #58a6ff; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-text .label { color: var(--fg-1); font-size: 10px; }
+  .browsers-list { color: var(--accent); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+  /* ── Sections ─────────────────────────────────────────────────────── */
   .section { margin-bottom: 10px; }
   .section-head {
     font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px;
-    color: #484f58; margin-bottom: 4px; padding: 0 2px;
+    color: var(--fg-2); margin-bottom: 4px; padding: 0 2px;
     display: flex; justify-content: space-between; align-items: center;
   }
 
+  /* ── Agent list ───────────────────────────────────────────────────── */
   .clients {
-    background: #010409;
-    border: 1px solid #21262d;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 4px 0;
     max-height: 120px;
@@ -73,90 +154,89 @@
   .client {
     display: flex; align-items: center; gap: 6px;
     padding: 3px 8px;
-    border-bottom: 1px solid #0d1117;
+    border-bottom: 1px solid var(--bg-0);
+    color: hsl(var(--client-hue, 40), 78%, var(--client-fg-l));
   }
   .client:last-child { border-bottom: none; }
-  /* Per-agent hue tint: the daemon assigns each connected agent a hue
-     (brand 40° + 45° per connection-order index, modulo 360). The row
-     sets --client-hue inline; the icon (which uses currentColor) and
-     the name both pick it up so the same agent reads with the same
-     tint in the popup, the on-page cursor, and the toast. */
-  .client { color: hsl(var(--client-hue, 40), 78%, 56%); }
   .client .agent-icon { width: 14px; height: 14px; flex-shrink: 0; }
   .client .agent-name { flex: 1; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .client .agent-meta { color: #484f58; font-size: 9px; }
+  .client .agent-meta { color: var(--fg-2); font-size: 9px; }
   .client .agent-tag {
-    background: #21262d; color: #8b949e;
+    background: var(--tag-bg); color: var(--tag-fg);
     padding: 1px 5px; border-radius: 8px;
     font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px;
   }
-  .client .agent-tag.claude-code, .client .agent-tag.claude { background: #4f3a17; color: #d29922; }
-  .client .agent-tag.cursor { background: #1f3a4f; color: #58a6ff; }
-  .client .agent-tag.vscode { background: #1f3a4f; color: #58a6ff; }
-  .clients-empty { color: #484f58; padding: 8px; text-align: center; font-style: italic; }
+  .client .agent-tag.claude-code,
+  .client .agent-tag.claude  { background: var(--claude-bg); color: var(--claude-fg); }
+  .client .agent-tag.cursor,
+  .client .agent-tag.vscode  { background: var(--ide-bg);    color: var(--ide-fg);    }
+  .clients-empty { color: var(--fg-2); padding: 8px; text-align: center; font-style: italic; }
 
-  .filter-bar {
-    display: flex; gap: 4px; margin-bottom: 4px;
-  }
+  /* ── Filter bar ───────────────────────────────────────────────────── */
+  .filter-bar { display: flex; gap: 4px; margin-bottom: 4px; }
   .filter-bar input {
     flex: 1;
-    background: #161b22; color: #c9d1d9;
-    border: 1px solid #21262d; border-radius: 4px;
+    background: var(--bg-1); color: var(--fg-0);
+    border: 1px solid var(--border); border-radius: 4px;
     padding: 4px 6px; font-family: inherit; font-size: 10px;
     outline: none;
   }
-  .filter-bar input:focus { border-color: #58a6ff; }
+  .filter-bar input:focus { border-color: var(--accent); }
   .filter-bar button {
-    background: #161b22; color: #8b949e;
-    border: 1px solid #21262d; border-radius: 4px;
+    background: var(--bg-1); color: var(--fg-1);
+    border: 1px solid var(--border); border-radius: 4px;
     padding: 4px 8px; font-size: 10px; cursor: pointer;
     font-family: inherit;
   }
-  .filter-bar button:hover { background: #21262d; color: #c9d1d9; }
+  .filter-bar button:hover { background: var(--border); color: var(--fg-0); }
 
+  /* ── Activity log ─────────────────────────────────────────────────── */
   .log {
     max-height: 480px;
     overflow-y: auto;
-    background: #010409;
-    border: 1px solid #21262d;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 4px 0;
   }
   .log::-webkit-scrollbar { width: 4px; }
-  .log::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+  .log::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }
 
   .entry {
-    border-bottom: 1px solid #0d1117;
+    border-bottom: 1px solid var(--bg-0);
     transition: background 0.15s;
     cursor: pointer;
   }
-  .entry:hover { background: #161b22; }
-  .entry.running { background: #161b2288; }
+  .entry:hover { background: var(--bg-1); }
+  /* Semi-transparent bg-1 tint for in-flight commands */
+  .entry.running { background: color-mix(in srgb, var(--bg-1) 53%, transparent); }
   .entry-row {
     display: flex;
     align-items: center;
     padding: 3px 8px;
     gap: 6px;
   }
-  .entry .time { color: #484f58; width: 55px; flex-shrink: 0; }
-  .entry .action { color: #58a6ff; font-weight: 500; flex-shrink: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .entry .action.err { color: #f85149; }
-  .entry .intent { color: #c9d1d9; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
-  .entry .intent.muted { color: #6e7681; font-style: normal; }
-  .entry .dur { color: #8b949e; text-align: right; width: 50px; flex-shrink: 0; }
-  .entry .dur.fast { color: #3fb950; }
-  .entry .dur.slow { color: #d29922; }
-  .entry .dur.err { color: #f85149; }
+  .entry .time   { color: var(--fg-2); width: 55px; flex-shrink: 0; }
+  .entry .action { color: var(--accent); font-weight: 500; flex-shrink: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry .action.err { color: var(--error); }
+  .entry .intent { color: var(--fg-0); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+  .entry .intent.muted { color: var(--fg-3); font-style: normal; }
+  .entry .dur          { color: var(--fg-1); text-align: right; width: 50px; flex-shrink: 0; }
+  .entry .dur.fast     { color: var(--success); }
+  .entry .dur.slow     { color: var(--warn); }
+  .entry .dur.err      { color: var(--error); }
   .entry .spinner {
-    width: 10px; height: 10px; border: 1.5px solid #58a6ff;
-    border-top-color: transparent; border-radius: 50%;
+    width: 10px; height: 10px;
+    border: 1.5px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
     animation: spin 0.6s linear infinite;
     flex-shrink: 0;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .entry .client-chip {
-    background: hsl(var(--client-hue, 40), 28%, 18%);
-    color: hsl(var(--client-hue, 40), 78%, 56%);
+    background: hsl(var(--client-hue, 40), 28%, var(--chip-bg-l));
+    color:      hsl(var(--client-hue, 40), 78%, var(--chip-fg-l));
     padding: 1px 4px; border-radius: 6px;
     font-size: 8px; flex-shrink: 0;
     max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -164,43 +244,41 @@
 
   .entry-detail {
     padding: 4px 8px 8px 70px;
-    color: #8b949e; font-size: 10px;
-    background: #0d1117;
-    border-top: 1px dashed #21262d;
+    color: var(--fg-1); font-size: 10px;
+    background: var(--bg-0);
+    border-top: 1px dashed var(--border);
     display: none;
     word-break: break-all;
   }
   .entry.expanded .entry-detail { display: block; }
   .entry-detail .row { margin-bottom: 4px; }
-  .entry-detail .key { color: #6e7681; text-transform: uppercase; font-size: 8px; letter-spacing: 1px; }
+  .entry-detail .key { color: var(--fg-3); text-transform: uppercase; font-size: 8px; letter-spacing: 1px; }
   .entry-detail pre {
-    background: #010409;
-    border: 1px solid #21262d;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
     border-radius: 3px;
     padding: 4px 6px;
     margin-top: 2px;
-    color: #c9d1d9; font-size: 10px;
+    color: var(--fg-0); font-size: 10px;
     white-space: pre-wrap; word-break: break-word;
     max-height: 120px; overflow-y: auto;
   }
 
-  .stats-row {
-    display: flex;
-    gap: 6px;
-  }
+  /* ── Stats row ────────────────────────────────────────────────────── */
+  .stats-row { display: flex; gap: 6px; }
   .stat {
     flex: 1;
     text-align: center;
     padding: 6px 4px;
-    background: #161b22;
-    border: 1px solid #21262d;
+    background: var(--bg-1);
+    border: 1px solid var(--border);
     border-radius: 4px;
   }
-  .stat .val { font-size: 15px; font-weight: 700; color: #58a6ff; }
-  .stat .val.warn { color: #f85149; }
-  .stat .lbl { font-size: 8px; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+  .stat .val      { font-size: 15px; font-weight: 700; color: var(--accent); }
+  .stat .val.warn { color: var(--error); }
+  .stat .lbl      { font-size: 8px; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
 
-  .empty { color: #484f58; text-align: center; padding: 20px; font-style: italic; }
+  .empty { color: var(--fg-2); text-align: center; padding: 20px; font-style: italic; }
 </style>
 </head>
 <body>
@@ -208,9 +286,7 @@
     <span class="bolt">&#x26A1;</span>
     <h1>TURBOWEB</h1>
     <span class="ver" id="ver">MCP</span>
-    <button id="popout"
-            title="Open in resizable window"
-            style="margin-left:6px;background:#161b22;color:#8b949e;border:1px solid #21262d;border-radius:4px;padding:3px 8px;font:10px/1 inherit;cursor:pointer;">
+    <button id="popout" title="Open in resizable window" class="popout-btn">
       ⤢ Pop out
     </button>
   </div>

@@ -29,6 +29,7 @@ globalThis.chrome = {
     })),
     sendMessage: vi.fn(),
     getManifest: vi.fn(() => ({ version: '0.0.0-test' })),
+    getURL: vi.fn((path) => `chrome-extension://test-id/${path}`),
     onMessage: makeEvent(),
     onConnect: makeEvent(),
     get lastError() { return chrome.runtime._lastError; },
@@ -67,6 +68,7 @@ globalThis.chrome = {
   action: {
     setBadgeText: vi.fn(),
     setBadgeBackgroundColor: vi.fn(),
+    setIcon: vi.fn(),
   },
 };
 
@@ -125,6 +127,21 @@ Object.defineProperty(window, 'scrollY', { value: 0, writable: true, configurabl
 // --- Mock scrollBy ---
 window.scrollBy = vi.fn();
 
+// jsdom doesn't implement window.matchMedia — popup.js calls it at load
+// time to set the action icon for the current colour-scheme.  Return a
+// minimal MediaQueryList stub: never matches (dark=false) and addEventListener
+// is a no-op so the change listener registers without throwing.
+if (typeof window.matchMedia !== 'function') {
+  window.matchMedia = vi.fn((query) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+}
+
 // --- jsdom polyfills ---
 // jsdom 26 doesn't implement innerText (returns undefined)
 if (typeof HTMLElement.prototype.innerText === 'undefined') {
@@ -139,6 +156,24 @@ if (typeof HTMLElement.prototype.innerText === 'undefined') {
 if (typeof document.execCommand !== 'function') {
   document.execCommand = vi.fn().mockReturnValue(true);
 }
+
+// jsdom has no layout engine — offsetParent is always null, which makes
+// resolveVisible() treat every element as hidden and throw.
+// Polyfill: connected elements return their parentElement (truthy ≠ null);
+// disconnected elements or those with inline display:none stay null.
+Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
+  get() {
+    if (!this.isConnected) return null;
+    // Walk up checking for inline display:none (same as browser behaviour)
+    let node = this;
+    while (node && node !== document.documentElement) {
+      if (node.style && node.style.display === 'none') return null;
+      node = node.parentElement;
+    }
+    return this.parentElement;
+  },
+  configurable: true,
+});
 
 // jsdom doesn't implement PointerEvent — content.js click() dispatches the
 // full pointer+mouse sequence a real click produces. PointerEvent extends
