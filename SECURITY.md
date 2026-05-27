@@ -41,11 +41,21 @@ It does not assume:
 | **A page that the agent visits attacks the extension.** | The content script reads page DOM; if the page intentionally returns malicious DOM content designed to confuse the agent, the agent may make bad decisions. This is an agent-side problem; we expose the data faithfully. |
 | **The user explicitly disables the on-page overlay.** | The overlay is the safety signal. Killing it removes the user's visibility into what the agent is doing. |
 
-## Verifying a release
+## macOS Gatekeeper (automatic — no action needed)
 
-Release assets are signed via [Sigstore / cosign](https://www.sigstore.dev)
-using GitHub's keyless OIDC — no long-lived signing keys, no private key
-material to leak. Each release ships:
+The macOS (`darwin-arm64`) release binary is signed with a **Developer ID
+Application** certificate and notarized with Apple's OCSP service by the
+release CI workflow. Gatekeeper verifies the notarization ticket on first
+run and accepts the binary automatically — no quarantine dialog, no
+`xattr -d com.apple.quarantine`, no manual codesign check needed.
+
+## Verifying a release (supply-chain assurance)
+
+For users who want to confirm that a binary came from *this repo's CI
+pipeline* rather than a third party, release assets are signed via
+[Sigstore / cosign](https://www.sigstore.dev) using GitHub's keyless OIDC —
+no long-lived signing keys, no private key material to leak. Each release
+ships:
 
 - `SHA256SUMS` — checksums for every asset.
 - `SHA256SUMS.sig` + `SHA256SUMS.crt` — cosign signature + signing
@@ -58,7 +68,7 @@ Verify a download:
 ```sh
 # 1. Grab the binary you want + the three SHA256SUMS files.
 gh release download v1.0.0 -p 'turboweb-mcp-by-ikari-darwin-arm64' \
-                          -p 'SHA256SUMS*'
+                           -p 'SHA256SUMS*'
 
 # 2. Confirm the signature is from this repo's release workflow.
 cosign verify-blob \
@@ -69,6 +79,9 @@ cosign verify-blob \
   SHA256SUMS
 
 # 3. Confirm your binary's hash matches what was signed.
+#    macOS:
+shasum -a 256 -c SHA256SUMS --ignore-missing
+#    Linux:
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 

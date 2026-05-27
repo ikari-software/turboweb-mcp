@@ -269,9 +269,12 @@ popup and toast. It's clamped to 200 chars server-side, but treat it as
 the model's claim about what it's doing — verify destructive actions in
 the activity-row params, not just by reading the intent.
 
-**Full threat model in [`SECURITY.md`](SECURITY.md).** Release assets are
-signed via Sigstore — verify with `cosign verify-blob` before running an
-unfamiliar binary; instructions in `SECURITY.md`.
+**Full threat model in [`SECURITY.md`](SECURITY.md).** macOS release
+binaries are notarized with a Developer ID Application certificate —
+Gatekeeper accepts downloaded copies automatically on first run, no manual
+steps needed. For supply-chain assurance (proving the binary came from this
+repo's CI pipeline), release assets are also signed via Sigstore cosign;
+see `SECURITY.md` for `cosign verify-blob` instructions.
 
 ## Licence &amp; trademark
 
