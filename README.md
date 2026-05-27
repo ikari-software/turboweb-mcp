@@ -124,36 +124,49 @@ Wire it into your MCP host (e.g. `~/.claude.json`):
 {
   "mcpServers": {
     "turboweb": {
-      "command": "/path/to/bin/turboweb-mcp-by-ikari"
+      "command": "/path/to/bin/turboweb-mcp-by-ikari",
+      "env": {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+      }
     }
   }
 }
 ```
 
+> **Note on env vars**: MCP hosts launch the server in a minimal environment
+> that often does not inherit your shell's variables. The `env` block above
+> forwards the keys from your shell into the server process. Omit whichever
+> keys you don't use.
+
 ## Environment variables
 
 | Variable                | Default | Effect |
 | ----------------------- | ------- | ------ |
-| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | unset | Enable Haiku for question-grounding on `find_text`, `extract_text`, `inspect`, `describe`, `run_tool` |
-| `TURBOWEB_AI_BACKEND`   | `auto`  | `auto` (Haiku if key set, else Gemini Nano) · `haiku` · `local` · `none` |
+| `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY` | unset | Enable Claude Haiku for AI-grounded answers |
+| `GEMINI_API_KEY`        | unset   | Enable Google Gemini Flash for AI-grounded answers |
+| `TURBOWEB_AI_BACKEND`   | `auto`  | `auto` · `haiku` · `gemini` · `local` · `none` |
 | `MCP_CLIENT_LABEL`      | derived | Override the session label shown in the extension popup |
 
 ## AI backends
 
-Tools that accept a `question` argument can hand the raw result to a
-language model for a concise answer:
+Tools that accept a `question` argument hand the raw result to a language
+model for a concise answer. Set at least one key and the server picks it up
+at startup:
 
-- **Haiku** (`claude-haiku-4-5-20251001`) when `ANTHROPIC_API_KEY` is set.
-  Multimodal (handles `describe`'s screenshot), 80k-char context, fast.
-- **Chrome's built-in Gemini Nano** (`self.LanguageModel`) when Haiku
-  isn't configured *or* when `TURBOWEB_AI_BACKEND=local`. Runs on-device,
-  free, offline. Requires Chrome 138+ with the Prompt API flag enabled
-  and the Optimization Guide On Device Model downloaded (check
-  `chrome://components`). Text-only — screenshots are skipped when
-  falling back to local. ~12k-char context window.
+- **Claude Haiku** (`claude-haiku-4-5-20251001`) via `ANTHROPIC_API_KEY`.
+  Multimodal (handles `describe`'s screenshot), 80k-char context.
+- **Google Gemini Flash** (`gemini-2.0-flash-lite`) via `GEMINI_API_KEY`.
+  Multimodal, 80k-char context. Great choice when you have a Gemini key
+  but not an Anthropic one.
+- **Chrome's built-in Gemini Nano** (`self.LanguageModel`) — free, on-device,
+  no key needed. Only available in Chrome 138+ with the Prompt API flag
+  enabled. Text-only, ~12k-char context. Used as a last resort in `auto`.
 
-When neither backend is available, tools return raw structured data
-prefixed with `[AI unavailable — raw data follows]`. Nothing breaks.
+`auto` cascade: **Haiku → Gemini → local Gemini Nano → raw data** (silent,
+no banner). When a configured provider fails (bad key, quota) a brief banner
+appears; when nothing is configured the tools just return raw structured data.
+Nothing breaks either way.
 
 ## Tool surface
 
