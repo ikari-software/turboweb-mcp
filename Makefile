@@ -8,7 +8,7 @@ GITHUB_REPO = ikari-software/turboweb-mcp
 # /usr/local. Override with `make install PREFIX=/path`.
 PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
 
-.PHONY: build install release clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
+.PHONY: build install release notarize-darwin clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
 # cross-compiled binaries) live in dist/.
@@ -36,7 +36,18 @@ install: build
 #   - dist/*.xpi (AMO-signed) when WEB_EXT_API_KEY / WEB_EXT_API_SECRET are
 #     set; skipped otherwise so a local `make release` without credentials
 #     still succeeds.
-#   - dist/SHA256SUMS (local checksums; CI overwrites with cosign-signed copy)
+#   - dist/SHA256SUMS covering the (notarized) darwin binary + all other
+#     artifacts; CI overwrites this with a cosign-signed authoritative copy.
+#
+# macOS notarization (required so Gatekeeper accepts downloaded binaries):
+#   Set APPLE_DEVELOPER_ID to sign with a Developer ID Application certificate,
+#   then either APPLE_NOTARY_PROFILE (a keychain profile created with
+#   `xcrun notarytool store-credentials`) or the three env vars below:
+#     APPLE_ID             Apple ID email
+#     APP_SPECIFIC_PASSWORD app-specific password from appleid.apple.com
+#     APPLE_TEAM_ID        10-character Apple team ID
+#   Without APPLE_DEVELOPER_ID the darwin binary is ad-hoc signed; Gatekeeper
+#   will reject downloaded copies (SIGKILL, exit 137).
 #
 # Old versioned XPIs accumulate in dist/ across releases; purge them first so
 # only the current version's artifacts land in dist/*, then upload with:
@@ -54,9 +65,11 @@ release: extension extension-zip extension-xpi firefox-updates-json
 		! -name '$(BINARY)-extension-firefox-$(VERSION).xpi' -delete 2>/dev/null; true
 	@find dist -maxdepth 1 -name '$(BINARY)-chrome-store-*.zip' -delete 2>/dev/null; true
 	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-darwin-arm64 .
+	@$(MAKE) --no-print-directory notarize-darwin
 	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-linux-amd64 .
 	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-amd64.exe .
 	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-arm64.exe .
+	@# SHA256SUMS after notarization so the hash covers the signed binary.
 	@cd dist && shasum -a 256 \
 		$(BINARY)-darwin-arm64 \
 		$(BINARY)-linux-amd64 \
@@ -66,6 +79,45 @@ release: extension extension-zip extension-xpi firefox-updates-json
 		$(BINARY)-extension-firefox-$(VERSION).xpi \
 		firefox-updates.json > SHA256SUMS
 	@echo "sha256sums: dist/SHA256SUMS (local; authoritative copy is cosign-signed by CI)"
+
+# Sign and notarize the macOS darwin-arm64 binary for Gatekeeper acceptance.
+# Called automatically by `make release` — can also be run standalone after a
+# manual build if the binary needs to be re-signed.
+#
+# With APPLE_DEVELOPER_ID set:
+#   codesign --options runtime --timestamp  (required for notarization)
+#   xcrun notarytool submit --wait          (registers ticket with Apple OCSP)
+#   No staple — plain binaries can't be stapled; Gatekeeper does an online
+#   OCSP check on first run instead.
+# Without APPLE_DEVELOPER_ID:
+#   Falls back to ad-hoc signing. Fine for local `make build`/`make install`
+#   (no quarantine xattr), but Gatekeeper rejects downloaded binaries.
+notarize-darwin:
+	@if [ -z "$$APPLE_DEVELOPER_ID" ]; then \
+		codesign -s - --force dist/$(BINARY)-darwin-arm64 2>/dev/null || true; \
+		echo "notarize-darwin: APPLE_DEVELOPER_ID not set — ad-hoc only (Gatekeeper will reject downloads)"; \
+	else \
+		echo "notarize-darwin: signing dist/$(BINARY)-darwin-arm64 with Developer ID …"; \
+		codesign --sign "$$APPLE_DEVELOPER_ID" \
+			--options runtime --timestamp --force \
+			dist/$(BINARY)-darwin-arm64 && \
+		echo "notarize-darwin: submitting to Apple notarization service (may take ~1 min) …" && \
+		tmpzip=$$(mktemp /tmp/notarize-XXXXXX.zip) && \
+		zip -j "$$tmpzip" dist/$(BINARY)-darwin-arm64 && \
+		if [ -n "$$APPLE_NOTARY_PROFILE" ]; then \
+			xcrun notarytool submit "$$tmpzip" \
+				--keychain-profile "$$APPLE_NOTARY_PROFILE" \
+				--wait; \
+		else \
+			xcrun notarytool submit "$$tmpzip" \
+				--apple-id "$$APPLE_ID" \
+				--password "$$APP_SPECIFIC_PASSWORD" \
+				--team-id "$$APPLE_TEAM_ID" \
+				--wait; \
+		fi; \
+		rm -f "$$tmpzip"; \
+		echo "notarize-darwin: done — ticket registered with Apple OCSP"; \
+	fi
 
 # One-shot rebuild of the loadable extension into extension/dist/{chrome,firefox}/.
 extension:
