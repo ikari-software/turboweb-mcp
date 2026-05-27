@@ -45,3 +45,16 @@ func handleVersion(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(daemonInfo)
 }
+
+// handleReloadExtension broadcasts a reload_extension message to every
+// connected browser extension. Triggered by POST (or GET) /reload-extension.
+// Gated by localhost-only binding — no additional auth needed.
+func handleReloadExtension(w http.ResponseWriter, _ *http.Request) {
+	broadcastExtensionReload(serverVersion)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"version": serverVersion,
+		"message": "reload_extension broadcast sent to all connected browsers",
+	})
+}

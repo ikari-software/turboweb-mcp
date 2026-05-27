@@ -18,7 +18,7 @@ var logger = log.New(os.Stderr, "[turboweb] ", 0)
 // stale daemon and respawn it instead of routing through the old build.
 // Injected at build time via -ldflags "-X main.serverVersion=VERSION";
 // the fallback keeps `go run .` and IDE debuggers working without make.
-var serverVersion = "1.8.3"
+var serverVersion = "1.8.4"
 
 func main() {
 	// --ws-server: run as a standalone WebSocket daemon (no MCP stdio).

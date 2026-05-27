@@ -146,6 +146,7 @@ func computeClientHues() {
 func RunDaemon() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", handleVersion)
+	mux.HandleFunc("/reload-extension", handleReloadExtension)
 	mux.HandleFunc("/", handleWSConnection)
 	mux.HandleFunc("/relay", handleRelayConnection)
 
@@ -377,6 +378,7 @@ func startWebSocket() {
 // startInProcess runs the WS server in-process (fallback for when daemon can't start).
 func startInProcess() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/reload-extension", handleReloadExtension)
 	mux.HandleFunc("/", handleWSConnection)
 	addr := fmt.Sprintf("127.0.0.1:%d", wsPort)
 	logger.Printf("WebSocket server on ws://%s (in-process)", addr)
