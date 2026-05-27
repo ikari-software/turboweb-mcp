@@ -226,20 +226,43 @@ func askLocalOrRaw(rawData json.RawMessage, question, systemPrompt string) (*mcp
 // askLocalOrRawWithHaikuCause is the auto-mode-aware fallback: if the
 // preceding Haiku attempt also failed, we surface _both_ causes in the
 // banner so the user isn't told only about the secondary local-AI failure.
-// Without this, an expired ANTHROPIC_API_KEY surfaces as the misleading
-// banner "[AI unavailable (no browser extensions connected) — raw data follows]"
-// when the real cause is the Anthropic 401.
+//
+// Silent degradation policy: when local AI is simply not present/configured
+// (LOCAL_AI_UNAVAILABLE = browser has no LanguageModel API; LOCAL_AI_NOT_READY
+// = model not downloaded yet) AND Haiku was never configured, we return raw
+// data with no banner. The raw data is the useful output and the banner was
+// noise for users who haven't set up either AI backend. We only surface a
+// banner for actionable failures: Haiku was configured but broke, or local AI
+// hit an unexpected error (probe/create failed).
 func askLocalOrRawWithHaikuCause(rawData json.RawMessage, question, systemPrompt string, haikuErr error) (*mcp.CallToolResult, error) {
 	answer, err := localAsk(question, string(rawData), systemPrompt)
 	if err == nil {
 		return mcp.NewToolResultText(answer), nil
 	}
-	cause := err.Error()
+	errStr := err.Error()
+	// "Not present" and "not yet downloaded" are expected, non-actionable states
+	// for most users — especially Chromium-based browsers that don't ship Gemini Nano
+	// (Arc, Brave, etc.) or haven't enabled the flag.
+	localExpected := strings.Contains(errStr, "LOCAL_AI_UNAVAILABLE") ||
+		strings.Contains(errStr, "LOCAL_AI_NOT_READY")
+
 	switch {
 	case haikuErr != nil:
-		cause = "haiku: " + haikuErr.Error() + "; local: " + err.Error()
-	case haiku == nil && haikuInitReason != "":
-		cause = "haiku: " + haikuInitReason + "; local: " + err.Error()
+		// Haiku was configured and failed — that's the actionable error.
+		// Don't append local-AI noise when it's just "not available".
+		if localExpected {
+			return mcp.NewToolResultText("[Haiku unavailable (" + haikuErr.Error() + ") — raw data follows]\n" + string(rawData)), nil
+		}
+		return mcp.NewToolResultText("[AI unavailable (haiku: " + haikuErr.Error() + "; local: " + errStr + ") — raw data follows]\n" + string(rawData)), nil
+	case localExpected:
+		// Neither backend configured — return raw data silently, no banner.
+		return mcp.NewToolResultText(string(rawData)), nil
+	default:
+		// Unexpected local AI failure (probe/create error) — surface it.
+		cause := errStr
+		if haiku == nil && haikuInitReason != "" {
+			cause = "haiku: " + haikuInitReason + "; local: " + errStr
+		}
+		return mcp.NewToolResultText("[AI unavailable (" + cause + ") — raw data follows]\n" + string(rawData)), nil
 	}
-	return mcp.NewToolResultText("[AI unavailable (" + cause + ") — raw data follows]\n" + string(rawData)), nil
 }

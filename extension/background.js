@@ -1157,7 +1157,7 @@ async function dispatch(action, params) {
 async function askLocal({ question, context: ctx, systemPrompt } = {}) {
   const LM = (typeof self !== 'undefined' && self.LanguageModel) || globalThis.LanguageModel;
   if (!LM) {
-    throw new Error('LOCAL_AI_UNAVAILABLE: LanguageModel API not present (Chrome 138+ required; enable in chrome://flags#prompt-api-for-gemini-nano)');
+    throw new Error('LOCAL_AI_UNAVAILABLE: LanguageModel API not present in this browser');
   }
 
   let availability;
@@ -1167,7 +1167,7 @@ async function askLocal({ question, context: ctx, systemPrompt } = {}) {
     throw new Error('LOCAL_AI_PROBE_FAILED: ' + (e?.message || String(e)));
   }
   if (availability !== 'available') {
-    throw new Error('LOCAL_AI_NOT_READY: status=' + availability + ' (check chrome://components for Optimization Guide On Device Model)');
+    throw new Error('LOCAL_AI_NOT_READY: model not yet downloaded (status=' + availability + ')');
   }
 
   // Trim context to a safe window (~4k tokens ≈ 12k chars). Gemini Nano
