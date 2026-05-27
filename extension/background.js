@@ -213,6 +213,19 @@ function connect() {
     startKeepalive();
     updateBadge(true);
     broadcast({ type: 'status', connected: true, browsers: 'active' });
+
+    // Identify this browser to the server immediately — no tab needed.
+    // navigator.userAgent is available in both Chrome service workers and
+    // Firefox event pages. The window.zen probe is caught by try/catch so
+    // it works safely in service worker contexts where window is undefined.
+    const _helloUA = (function() {
+      const u = (typeof navigator !== 'undefined' ? navigator.userAgent : '');
+      try {
+        if (typeof window !== 'undefined' && typeof window.zen !== 'undefined') return 'Zen/' + u;
+      } catch (_) {}
+      return u;
+    })();
+    try { ws.send(JSON.stringify({ type: 'hello', ua: _helloUA })); } catch (_) {}
   };
 
   ws.onmessage = async (event) => {

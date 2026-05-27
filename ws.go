@@ -487,37 +487,9 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		name:   fmt.Sprintf("browser-%d", len(browsers)+1),
 		tabIDs: make(map[int]bool),
 	}
-	// Detect browser name eagerly — before list_tabs is called — so it's
-	// available in connection_status and in sendToTab disambiguation.
-	go func() {
-		raw, err := sendTo(bc, "execute_js", map[string]any{"code": jsBrowserFingerprint}, 3000)
-		if err != nil {
-			return
-		}
-		var resp struct {
-			Result string `json:"result"`
-		}
-		if json.Unmarshal(raw, &resp) != nil {
-			return
-		}
-		ua := resp.Result
-		bc.mu.Lock()
-		switch {
-		case contains(ua, "Zen"):
-			bc.name = "Zen"
-		case contains(ua, "Arc"):
-			bc.name = "Arc"
-		case contains(ua, "Brave"):
-			bc.name = "Brave"
-		case contains(ua, "Edg"):
-			bc.name = "Edge"
-		case contains(ua, "Firefox"):
-			bc.name = "Firefox"
-		case contains(ua, "Chrome"):
-			bc.name = "Chrome"
-		}
-		bc.mu.Unlock()
-	}()
+	// Browser name is set by the 'hello' push message the extension sends
+	// in ws.onopen — no execute_js round-trip needed. The hello message
+	// arrives immediately and requires no active tab.
 
 	browsersMu.Lock()
 	browsers[conn] = bc
@@ -544,6 +516,34 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			break
+		}
+
+		// Extension identifying itself on connect (sent from ws.onopen).
+		// Using a push message avoids the execute_js round-trip that needed
+		// an active tab — which could fail with "No active tab found" when
+		// the daemon restarts in the background.
+		var hello struct {
+			Type string `json:"type"`
+			UA   string `json:"ua"`
+		}
+		if json.Unmarshal(message, &hello) == nil && hello.Type == "hello" && hello.UA != "" {
+			bc.mu.Lock()
+			switch {
+			case contains(hello.UA, "Zen"):
+				bc.name = "Zen"
+			case contains(hello.UA, "Arc"):
+				bc.name = "Arc"
+			case contains(hello.UA, "Brave"):
+				bc.name = "Brave"
+			case contains(hello.UA, "Edg"):
+				bc.name = "Edge"
+			case contains(hello.UA, "Firefox"):
+				bc.name = "Firefox"
+			case contains(hello.UA, "Chrome"):
+				bc.name = "Chrome"
+			}
+			bc.mu.Unlock()
+			continue
 		}
 
 		// Active health check from the extension service worker. We
