@@ -115,11 +115,14 @@ jobs:
           echo "All required artifacts present."
 
       - name: Import Developer ID certificate into CI keychain
-        if: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12 != '' }}
         env:
           APPLE_DEVELOPER_ID_CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12 }}
           APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
         run: |
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12" ]; then
+            echo "APPLE_DEVELOPER_ID_CERT_P12 not set — skipping certificate import"
+            exit 0
+          fi
           # Use a random password so the keychain can't be opened by other processes.
           KC_PASS=$(openssl rand -hex 16)
           security create-keychain -p "$KC_PASS" build.keychain
