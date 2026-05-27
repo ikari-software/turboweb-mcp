@@ -36,15 +36,35 @@ install: build
 #   - dist/*.xpi (AMO-signed) when WEB_EXT_API_KEY / WEB_EXT_API_SECRET are
 #     set; skipped otherwise so a local `make release` without credentials
 #     still succeeds.
+#   - dist/SHA256SUMS (local checksums; CI overwrites with cosign-signed copy)
 #
-# Upload with `gh release create vX.Y.Z dist/*`.
+# Old versioned XPIs accumulate in dist/ across releases; purge them first so
+# only the current version's artifacts land in dist/*, then upload with:
+#   gh release create vX.Y.Z \
+#     dist/$(BINARY)-darwin-arm64 dist/$(BINARY)-linux-amd64 \
+#     dist/$(BINARY)-windows-amd64.exe dist/$(BINARY)-windows-arm64.exe \
+#     dist/$(BINARY)-extension-chrome.zip dist/$(BINARY)-extension-firefox.zip \
+#     dist/$(BINARY)-extension-firefox-$(VERSION).xpi \
+#     dist/firefox-updates.json dist/SHA256SUMS \
+#     --title "vX.Y.Z — …" --notes "…"
 release: extension extension-zip extension-xpi firefox-updates-json
 	@mkdir -p dist
+	@# Remove stale versioned XPIs from prior releases so dist/* stays clean.
+	@find dist -maxdepth 1 -name '$(BINARY)-extension-firefox-*.xpi' \
+		! -name '$(BINARY)-extension-firefox-$(VERSION).xpi' -delete 2>/dev/null; true
+	@find dist -maxdepth 1 -name '$(BINARY)-chrome-store-*.zip' -delete 2>/dev/null; true
 	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-darwin-arm64 .
 	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-linux-amd64 .
 	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-amd64.exe .
 	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-arm64.exe .
-	@cd dist && shasum -a 256 $(BINARY)-* firefox-updates.json > SHA256SUMS
+	@cd dist && shasum -a 256 \
+		$(BINARY)-darwin-arm64 \
+		$(BINARY)-linux-amd64 \
+		$(BINARY)-windows-amd64.exe \
+		$(BINARY)-windows-arm64.exe \
+		$(BINARY)-extension-chrome.zip \
+		$(BINARY)-extension-firefox-$(VERSION).xpi \
+		firefox-updates.json > SHA256SUMS
 	@echo "sha256sums: dist/SHA256SUMS (local; authoritative copy is cosign-signed by CI)"
 
 # One-shot rebuild of the loadable extension into extension/dist/{chrome,firefox}/.

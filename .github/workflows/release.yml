@@ -1,16 +1,26 @@
 name: release
 
 # Fires when a release is published from a v* tag. Downloads the pre-built
-# artifacts the developer uploaded via `gh release create dist/*`, generates
-# an authoritative SHA256SUMS file, signs it with Sigstore keyless OIDC
+# artifacts the developer uploaded via `gh release create`, generates an
+# authoritative SHA256SUMS file, signs it with Sigstore keyless OIDC
 # (cosign — no long-lived key material), and uploads the signature bundle
 # back to the release.
 #
 # Developer release workflow:
-#   1. make release              — builds binaries, extension zips, AMO XPI
-#   2. gh release create vX.Y.Z dist/* --title "..." --notes "..."
-#   3. This workflow fires automatically, adds:
-#        SHA256SUMS  SHA256SUMS.sig  SHA256SUMS.crt  SHA256SUMS.cosign.bundle
+#   1. make release              — builds binaries, extension zips, AMO XPI,
+#                                  local SHA256SUMS
+#   2. gh release create vX.Y.Z  dist/turboweb-mcp-by-ikari-darwin-arm64 \
+#                                 dist/turboweb-mcp-by-ikari-linux-amd64 \
+#                                 dist/turboweb-mcp-by-ikari-windows-amd64.exe \
+#                                 dist/turboweb-mcp-by-ikari-windows-arm64.exe \
+#                                 dist/turboweb-mcp-by-ikari-extension-chrome.zip \
+#                                 dist/turboweb-mcp-by-ikari-extension-firefox.zip \
+#                                 dist/turboweb-mcp-by-ikari-extension-firefox-X.Y.Z.xpi \
+#                                 dist/firefox-updates.json \
+#                                 dist/SHA256SUMS \
+#                                 --title "vX.Y.Z — …" --notes "…"
+#   3. This workflow fires, replaces SHA256SUMS with an authoritative copy and
+#      adds SHA256SUMS.sig, SHA256SUMS.crt, SHA256SUMS.cosign.bundle.
 #
 # Why CI downloads instead of rebuilds: `make release` calls `web-ext sign`
 # which submits the XPI to AMO. AMO rejects duplicate submissions, so
@@ -18,6 +28,9 @@ name: release
 # step. Separating build (developer) from signing (CI OIDC identity) is also
 # the correct trust model — the signature proves *this workflow* produced the
 # checksums, not any locally-run build.
+#
+# Explicit artifact names (not dist/*) are downloaded to avoid picking up
+# stale files from prior releases if any were accidentally included.
 #
 # Users verify downloads with `cosign verify-blob` — see SECURITY.md.
 
@@ -40,11 +53,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.event.release.tag_name }}"
+          version="${tag#v}"
           mkdir -p dist
           gh release download "$tag" \
             --repo "${{ github.repository }}" \
             --dir dist \
-            --pattern "turboweb-mcp-by-ikari-*" \
+            --pattern "turboweb-mcp-by-ikari-darwin-arm64" \
+            --pattern "turboweb-mcp-by-ikari-linux-amd64" \
+            --pattern "turboweb-mcp-by-ikari-windows-amd64.exe" \
+            --pattern "turboweb-mcp-by-ikari-windows-arm64.exe" \
+            --pattern "turboweb-mcp-by-ikari-extension-chrome.zip" \
+            --pattern "turboweb-mcp-by-ikari-extension-firefox-${version}.xpi" \
             --pattern "firefox-updates.json"
           echo "--- downloaded assets ---"
           ls -lh dist/
@@ -52,35 +71,38 @@ jobs:
       - name: Verify required artifacts are present
         run: |
           set -e
+          tag="${{ github.event.release.tag_name }}"
+          version="${tag#v}"
           missing=0
           for asset in \
             dist/turboweb-mcp-by-ikari-darwin-arm64 \
             dist/turboweb-mcp-by-ikari-linux-amd64 \
             dist/turboweb-mcp-by-ikari-windows-amd64.exe \
             dist/turboweb-mcp-by-ikari-windows-arm64.exe \
-            dist/turboweb-mcp-by-ikari-extension-chrome.zip; do
+            dist/turboweb-mcp-by-ikari-extension-chrome.zip \
+            "dist/turboweb-mcp-by-ikari-extension-firefox-${version}.xpi" \
+            dist/firefox-updates.json; do
             if [ ! -f "$asset" ]; then
               echo "::error::missing artifact: $asset"
               missing=1
             fi
           done
-          if [ ! -f dist/firefox-updates.json ]; then
-            echo "::error::dist/firefox-updates.json missing — was the XPI signed by AMO?"
-            missing=1
-          fi
-          if ! ls dist/*.xpi >/dev/null 2>&1; then
-            echo "::error::no signed .xpi in dist/ — AMO signing may have been skipped"
-            missing=1
-          fi
           [ "$missing" -eq 0 ] || exit 1
           echo "All required artifacts present."
 
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
-          # One canonical checksum file covering every release asset.
-          # Users grab this + its signature to verify any asset at once.
-          sha256sum turboweb-mcp-by-ikari-* firefox-updates.json > SHA256SUMS
+          tag="${{ github.event.release.tag_name }}"
+          version="${tag#v}"
+          sha256sum \
+            turboweb-mcp-by-ikari-darwin-arm64 \
+            turboweb-mcp-by-ikari-linux-amd64 \
+            turboweb-mcp-by-ikari-windows-amd64.exe \
+            turboweb-mcp-by-ikari-windows-arm64.exe \
+            turboweb-mcp-by-ikari-extension-chrome.zip \
+            "turboweb-mcp-by-ikari-extension-firefox-${version}.xpi" \
+            firefox-updates.json > SHA256SUMS
           echo "--- SHA256SUMS ---"
           cat SHA256SUMS
 
