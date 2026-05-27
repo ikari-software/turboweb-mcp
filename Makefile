@@ -40,14 +40,20 @@ install: build
 #     artifacts; CI overwrites this with a cosign-signed authoritative copy.
 #
 # macOS notarization (required so Gatekeeper accepts downloaded binaries):
-#   Set APPLE_DEVELOPER_ID to sign with a Developer ID Application certificate,
-#   then either APPLE_NOTARY_PROFILE (a keychain profile created with
-#   `xcrun notarytool store-credentials`) or the three env vars below:
-#     APPLE_ID             Apple ID email
-#     APP_SPECIFIC_PASSWORD app-specific password from appleid.apple.com
-#     APPLE_TEAM_ID        10-character Apple team ID
-#   Without APPLE_DEVELOPER_ID the darwin binary is ad-hoc signed; Gatekeeper
-#   will reject downloaded copies (SIGKILL, exit 137).
+#   The release.yml CI workflow handles notarization automatically when the
+#   following repository secrets are configured (Settings → Secrets → Actions):
+#     APPLE_DEVELOPER_ID             "Developer ID Application: Name (TEAMID)"
+#     APPLE_DEVELOPER_ID_CERT_P12    base64-encoded .p12 of the cert + private key
+#     APPLE_DEVELOPER_ID_CERT_PASSWORD  password set when exporting the .p12
+#     APPLE_ID                       Apple ID email
+#     APP_SPECIFIC_PASSWORD          app-specific password from appleid.apple.com
+#   Without those secrets CI produces an ad-hoc signed darwin binary and prints
+#   a warning; Gatekeeper will reject downloaded copies (SIGKILL, exit 137).
+#
+#   Local notarization (optional, for testing): run `make notarize-darwin`
+#   with APPLE_DEVELOPER_ID and either APPLE_NOTARY_PROFILE (a keychain
+#   profile from `xcrun notarytool store-credentials`) or the three vars:
+#     APPLE_ID  APP_SPECIFIC_PASSWORD  APPLE_TEAM_ID
 #
 # Old versioned XPIs accumulate in dist/ across releases; purge them first so
 # only the current version's artifacts land in dist/*, then upload with:
