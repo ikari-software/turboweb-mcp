@@ -1,5 +1,5 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.8.4
+VERSION = 1.8.5
 GITHUB_REPO = ikari-software/turboweb-mcp
 
 # Install prefix — defaults to the Homebrew prefix when `brew` is on PATH
@@ -44,6 +44,8 @@ release: extension extension-zip extension-xpi firefox-updates-json
 	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-linux-amd64 .
 	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-amd64.exe .
 	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-arm64.exe .
+	@cd dist && shasum -a 256 $(BINARY)-* firefox-updates.json > SHA256SUMS
+	@echo "sha256sums: dist/SHA256SUMS (local; authoritative copy is cosign-signed by CI)"
 
 # One-shot rebuild of the loadable extension into extension/dist/{chrome,firefox}/.
 extension:
