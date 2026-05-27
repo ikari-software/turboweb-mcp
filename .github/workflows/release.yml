@@ -29,14 +29,22 @@ name: release
 # the correct trust model — the signature proves *this workflow* produced the
 # checksums, not any locally-run build.
 #
-# Explicit artifact names (not dist/*) are downloaded to avoid picking up
-# stale files from prior releases if any were accidentally included.
+# workflow_dispatch lets you re-sign any release manually (e.g. if the
+# release tag predated a workflow fix). The workflow always uses the file
+# from the default branch, so dispatch picks up the latest fixes.
 #
 # Users verify downloads with `cosign verify-blob` — see SECURITY.md.
 
 on:
   release:
     types: [published]
+  # Manual re-run: useful when the release tag predates a workflow fix, or
+  # to sign a release that was published before this workflow existed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sign (e.g. v1.8.5)"
+        required: true
 
 permissions:
   contents: write   # gh release upload
@@ -45,6 +53,10 @@ permissions:
 jobs:
   sign-and-upload:
     runs-on: ubuntu-latest
+    # RELEASE_TAG resolves to the published release tag, or the manually-
+    # supplied input when triggered via workflow_dispatch.
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
       - uses: sigstore/cosign-installer@v3
 
@@ -52,10 +64,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
-          version="${tag#v}"
+          version="${RELEASE_TAG#v}"
           mkdir -p dist
-          gh release download "$tag" \
+          gh release download "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \
             --dir dist \
             --pattern "turboweb-mcp-by-ikari-darwin-arm64" \
@@ -71,8 +82,7 @@ jobs:
       - name: Verify required artifacts are present
         run: |
           set -e
-          tag="${{ github.event.release.tag_name }}"
-          version="${tag#v}"
+          version="${RELEASE_TAG#v}"
           missing=0
           for asset in \
             dist/turboweb-mcp-by-ikari-darwin-arm64 \
@@ -93,8 +103,7 @@ jobs:
       - name: Generate SHA256SUMS
         working-directory: dist
         run: |
-          tag="${{ github.event.release.tag_name }}"
-          version="${tag#v}"
+          version="${RELEASE_TAG#v}"
           sha256sum \
             turboweb-mcp-by-ikari-darwin-arm64 \
             turboweb-mcp-by-ikari-linux-amd64 \
@@ -121,8 +130,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
-          gh release upload "$tag" \
+          gh release upload "$RELEASE_TAG" \
             dist/SHA256SUMS \
             dist/SHA256SUMS.sig \
             dist/SHA256SUMS.crt \
