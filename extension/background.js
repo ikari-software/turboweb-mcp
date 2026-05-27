@@ -463,6 +463,20 @@ const CDP_MOD_SHIFT = 8;
 const attachedTabs = new Set();
 
 async function ensureDebugger(tabId) {
+  // chrome.debugger is a Chrome/Chromium-only API — Firefox and Zen do not
+  // expose it.  When BiDi is connected (launch_browser / connect_bidi) the Go
+  // server routes cdp_* tools through BiDi and never calls into the extension
+  // fallback.  Without BiDi on Firefox the only honest answer is a clear error
+  // pointing to the solution, rather than crashing with "chrome.debugger is
+  // not a function".
+  if (!chrome?.debugger) {
+    throw new Error(
+      'chrome.debugger is not available in this browser. ' +
+      'On Firefox / Zen, trusted-input tools (cdp_click, cdp_type, cdp_key, ' +
+      'cdp_scroll, get_cookies, set_input_files) require a BiDi connection — ' +
+      'use launch_browser or connect_bidi to enable them.'
+    );
+  }
   const tid = await resolveTab(tabId);
   if (attachedTabs.has(tid)) return tid;
   try {
