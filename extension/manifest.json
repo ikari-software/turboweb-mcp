@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TurboWeb MCP by ikari",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "description": "TurboWeb MCP by ikari — fast browser control over MCP (screenshots, DOM OCR, spatial awareness, on-page agent cursor)",
   "author": "Cezar Pokorski (ikari)",
   "homepage_url": "https://github.com/ikari-software/turboweb-mcp",

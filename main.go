@@ -45,6 +45,7 @@ func main() {
 
 	initSession()
 	initHaiku()
+	initGemini()
 	loadBrowserConfig()
 	if err := initDB(); err != nil {
 		logger.Printf("Warning: custom tools DB failed to init: %v", err)

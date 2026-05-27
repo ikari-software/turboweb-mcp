@@ -169,12 +169,15 @@ func maybeAskWithSystem(rawData json.RawMessage, question, systemPrompt, imageBa
 // askViaBackend is the single routing point for AI post-processing. It
 // honours TURBOWEB_AI_BACKEND, falls back gracefully when a backend
 // isn't usable, and never lets a backend failure bubble up as a tool
-// error — the worst case is "raw data follows" so the agent always gets
-// something useful back.
+// error — the worst case is raw data so the agent always gets something.
 //
-// Notes on screenshots: only the Anthropic API path is multimodal today.
-// When falling back to Gemini Nano, the image is dropped silently — local
-// AI still answers the question from the text context.
+// Backend selection (TURBOWEB_AI_BACKEND env var):
+//
+//	"auto"   (default) — Haiku → Gemini → local Gemini Nano → silent raw
+//	"haiku"  — Anthropic Claude Haiku only
+//	"gemini" — Google Gemini Flash only
+//	"local"  — Chrome built-in Gemini Nano only
+//	"none"   — always return raw data
 func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 string) (*mcp.CallToolResult, error) {
 	switch aiBackend() {
 	case "none":
@@ -190,10 +193,21 @@ func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 
 		}
 		answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
 		if err != nil {
-			// Don't hard-error the tool — surface the cause in the banner
-			// so the agent (and the human reading the transcript) can see
-			// _why_ Haiku failed (bad key, deprecated model, rate limit, …).
 			return mcp.NewToolResultText("[Haiku unavailable (" + err.Error() + ") — raw data follows]\n" + string(rawData)), nil
+		}
+		return mcp.NewToolResultText(answer), nil
+
+	case "gemini":
+		if gemini == nil {
+			reason := geminiInitReason
+			if reason == "" {
+				reason = "Gemini client not initialised"
+			}
+			return mcp.NewToolResultText("[Gemini unavailable (" + reason + ") — raw data follows]\n" + string(rawData)), nil
+		}
+		answer, err := gemini.ask(question, string(rawData), imageBase64, systemPrompt)
+		if err != nil {
+			return mcp.NewToolResultText("[Gemini unavailable (" + err.Error() + ") — raw data follows]\n" + string(rawData)), nil
 		}
 		return mcp.NewToolResultText(answer), nil
 
@@ -201,68 +215,82 @@ func askViaBackend(rawData json.RawMessage, question, systemPrompt, imageBase64 
 		return askLocalOrRaw(rawData, question, systemPrompt)
 
 	default: // "auto"
-		// Prefer Haiku when configured — better quality, multimodal.
-		var haikuErr error
+		// Cascade: Haiku (if key set) → Gemini (if key set) → local → silent raw.
+		// When a cloud provider is configured but fails, surface its error in a
+		// banner (the failure is actionable — bad key, quota, etc.).
+		// When no cloud provider is configured, silent raw is the right default.
 		if haiku != nil {
 			answer, err := haiku.ask(question, string(rawData), imageBase64, systemPrompt)
 			if err == nil {
 				return mcp.NewToolResultText(answer), nil
 			}
-			haikuErr = err
-			logger.Printf("Haiku error, falling back to local Gemini Nano: %v", err)
+			logger.Printf("Haiku error, trying Gemini: %v", err)
+			if gemini != nil {
+				answer, gerr := gemini.ask(question, string(rawData), imageBase64, systemPrompt)
+				if gerr == nil {
+					return mcp.NewToolResultText(answer), nil
+				}
+				logger.Printf("Gemini error: %v", gerr)
+			}
+			// Cloud providers configured but failed — try local then raw.
+			// Report the primary (Haiku) error if local also can't help.
+			return askLocalOrRawWithCloudErr(rawData, question, systemPrompt, "haiku: "+err.Error())
 		}
-		return askLocalOrRawWithHaikuCause(rawData, question, systemPrompt, haikuErr)
+		if gemini != nil {
+			answer, err := gemini.ask(question, string(rawData), imageBase64, systemPrompt)
+			if err == nil {
+				return mcp.NewToolResultText(answer), nil
+			}
+			logger.Printf("Gemini error, trying local AI: %v", err)
+			return askLocalOrRawWithCloudErr(rawData, question, systemPrompt, "gemini: "+err.Error())
+		}
+		// No cloud AI configured — try local, then silent raw.
+		return askLocalOrRaw(rawData, question, systemPrompt)
 	}
 }
 
-// askLocalOrRaw asks Chrome's built-in Gemini Nano via the extension. On
-// any failure (no browser connected, model not downloaded, API absent)
-// it returns the raw data with an explanatory prefix rather than erroring
-// the whole tool call.
+// askLocalOrRaw tries Chrome's built-in Gemini Nano, then returns raw data
+// silently (no banner) when no AI backend is configured. Used as the terminal
+// fallback when no cloud provider is set up.
 func askLocalOrRaw(rawData json.RawMessage, question, systemPrompt string) (*mcp.CallToolResult, error) {
-	return askLocalOrRawWithHaikuCause(rawData, question, systemPrompt, nil)
+	return askLocalOrRawWithCloudErr(rawData, question, systemPrompt, "")
 }
 
-// askLocalOrRawWithHaikuCause is the auto-mode-aware fallback: if the
-// preceding Haiku attempt also failed, we surface _both_ causes in the
-// banner so the user isn't told only about the secondary local-AI failure.
+// askLocalOrRawWithCloudErr tries local AI, then falls back to raw data.
+// cloudErrDesc is a human-readable description of why the preceding cloud
+// provider failed (empty when no cloud provider was configured).
 //
-// Silent degradation policy: when local AI is simply not present/configured
-// (LOCAL_AI_UNAVAILABLE = browser has no LanguageModel API; LOCAL_AI_NOT_READY
-// = model not downloaded yet) AND Haiku was never configured, we return raw
-// data with no banner. The raw data is the useful output and the banner was
-// noise for users who haven't set up either AI backend. We only surface a
-// banner for actionable failures: Haiku was configured but broke, or local AI
-// hit an unexpected error (probe/create failed).
-func askLocalOrRawWithHaikuCause(rawData json.RawMessage, question, systemPrompt string, haikuErr error) (*mcp.CallToolResult, error) {
+// Silent degradation policy: when no cloud provider is configured AND local AI
+// is simply not present (LOCAL_AI_UNAVAILABLE) or not downloaded yet
+// (LOCAL_AI_NOT_READY), return raw data with no banner. The raw data IS the
+// useful output; the banner adds noise without actionable guidance for users
+// who haven't set up any AI backend. We only surface a banner when a
+// configured provider actually broke (bad key, quota, unexpected error).
+func askLocalOrRawWithCloudErr(rawData json.RawMessage, question, systemPrompt, cloudErrDesc string) (*mcp.CallToolResult, error) {
 	answer, err := localAsk(question, string(rawData), systemPrompt)
 	if err == nil {
 		return mcp.NewToolResultText(answer), nil
 	}
 	errStr := err.Error()
 	// "Not present" and "not yet downloaded" are expected, non-actionable states
-	// for most users — especially Chromium-based browsers that don't ship Gemini Nano
-	// (Arc, Brave, etc.) or haven't enabled the flag.
+	// for most users — Chromium-based browsers without Gemini Nano (Arc, Brave…).
 	localExpected := strings.Contains(errStr, "LOCAL_AI_UNAVAILABLE") ||
 		strings.Contains(errStr, "LOCAL_AI_NOT_READY")
 
 	switch {
-	case haikuErr != nil:
-		// Haiku was configured and failed — that's the actionable error.
-		// Don't append local-AI noise when it's just "not available".
+	case cloudErrDesc != "":
+		// A cloud provider was configured and failed. Report that error.
+		// When local AI is just not available (expected), the cloud error is
+		// the only actionable piece; skip the irrelevant local noise.
 		if localExpected {
-			return mcp.NewToolResultText("[Haiku unavailable (" + haikuErr.Error() + ") — raw data follows]\n" + string(rawData)), nil
+			return mcp.NewToolResultText("[AI unavailable (" + cloudErrDesc + ") — raw data follows]\n" + string(rawData)), nil
 		}
-		return mcp.NewToolResultText("[AI unavailable (haiku: " + haikuErr.Error() + "; local: " + errStr + ") — raw data follows]\n" + string(rawData)), nil
+		return mcp.NewToolResultText("[AI unavailable (" + cloudErrDesc + "; local: " + errStr + ") — raw data follows]\n" + string(rawData)), nil
 	case localExpected:
-		// Neither backend configured — return raw data silently, no banner.
+		// No cloud provider configured, local AI not available — silent raw.
 		return mcp.NewToolResultText(string(rawData)), nil
 	default:
-		// Unexpected local AI failure (probe/create error) — surface it.
-		cause := errStr
-		if haiku == nil && haikuInitReason != "" {
-			cause = "haiku: " + haikuInitReason + "; local: " + errStr
-		}
-		return mcp.NewToolResultText("[AI unavailable (" + cause + ") — raw data follows]\n" + string(rawData)), nil
+		// Unexpected local AI failure — surface it.
+		return mcp.NewToolResultText("[AI unavailable (local: " + errStr + ") — raw data follows]\n" + string(rawData)), nil
 	}
 }

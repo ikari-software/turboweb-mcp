@@ -43,9 +43,10 @@ func localAsk(question, context, systemPrompt string) (string, error) {
 // aiBackend returns the AI-backend preference read from the
 // TURBOWEB_AI_BACKEND env var. One of:
 //
-//   - "auto" (default): prefer Haiku when ANTHROPIC_API_KEY is set, else
-//     try Chrome's built-in Gemini Nano; fall back to raw data on failure.
-//   - "haiku": only use Haiku (Anthropic API). Returns raw if not configured.
+//   - "auto" (default): Haiku → Gemini → local Gemini Nano → raw.
+//     Uses whichever keys are present; silent raw when none are configured.
+//   - "haiku": only use Haiku (Anthropic API). Set ANTHROPIC_API_KEY.
+//   - "gemini": only use Google Gemini. Set GEMINI_API_KEY.
 //   - "local": only use Chrome's built-in Gemini Nano. Returns raw if the
 //     browser doesn't expose LanguageModel or the model isn't downloaded.
 //   - "none": never post-process — always return raw data.
