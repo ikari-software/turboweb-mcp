@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TurboWeb MCP by ikari",
-  "version": "1.8.1",
-  "description": "TurboWeb MCP by ikari — fast browser control over MCP (screenshots, DOM OCR, spatial awareness, on-page agent cursor)",
+  "version": "1.8.2",
+  "description": "TurboWeb MCP by ikari \u2014 fast browser control over MCP (screenshots, DOM OCR, spatial awareness, on-page agent cursor)",
   "author": "Cezar Pokorski (ikari)",
   "homepage_url": "https://github.com/ikari-software/turboweb-mcp",
   "icons": {
@@ -11,8 +11,16 @@
     "48": "icons/app-icon-48.png",
     "128": "icons/app-icon-128.png"
   },
-  "permissions": ["tabs", "activeTab", "scripting", "debugger", "alarms"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "debugger",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "TurboWeb MCP by ikari",
@@ -28,8 +36,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

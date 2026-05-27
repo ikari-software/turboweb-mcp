@@ -844,6 +844,7 @@ async function screenshot(tabId, maxWidth = 1280, quality = 70) {
 
 // --- Execute JS in page's MAIN world ---
 // Auto-wraps in a function so bare `return` statements work.
+// Falls back to CDP Runtime.evaluate when the page's CSP blocks eval().
 async function executeJsMain(tabId, code) {
   const tid = await resolveTab(tabId);
   // If code has bare `return` (not already in a function), wrap in an IIFE.
@@ -865,7 +866,29 @@ async function executeJsMain(tabId, code) {
     args: [wrapped],
     world: 'MAIN',
   });
-  return results[0]?.result || { error: 'No result' };
+  const out = results[0]?.result || { error: 'No result' };
+
+  // Page CSP blocks eval() — CDP Runtime.evaluate runs below the DOM security
+  // layer and bypasses script-src restrictions entirely. Fall back silently.
+  if (out.error && out.error.includes('blocked by CSP') && chrome?.debugger) {
+    try {
+      await ensureDebugger(tid);
+      const { result: r, exceptionDetails } = await chrome.debugger.sendCommand(
+        { tabId: tid }, 'Runtime.evaluate',
+        { expression: wrapped, awaitPromise: true, returnByValue: true }
+      );
+      if (exceptionDetails) {
+        const msg = exceptionDetails.exception?.description || exceptionDetails.text;
+        return { error: msg };
+      }
+      return { result: r?.value ?? null };
+    } catch (cdpErr) {
+      // CDP not available (Firefox) — return the original CSP error with a hint
+      return { error: out.error, hint: 'Page CSP blocks eval. On Firefox/Zen use BiDi (launch_browser) to enable CDP for this fallback.' };
+    }
+  }
+
+  return out;
 }
 
 // --- Inject a custom script into the page and run it ---
