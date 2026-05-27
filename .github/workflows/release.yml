@@ -127,4 +127,5 @@ jobs:
             dist/SHA256SUMS.sig \
             dist/SHA256SUMS.crt \
             dist/SHA256SUMS.cosign.bundle \
+            --repo "${{ github.repository }}" \
             --clobber
