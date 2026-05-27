@@ -102,7 +102,7 @@ notarize-darwin:
 			--options runtime --timestamp --force \
 			dist/$(BINARY)-darwin-arm64 && \
 		echo "notarize-darwin: submitting to Apple notarization service (may take ~1 min) …" && \
-		tmpzip=$$(mktemp /tmp/notarize-XXXXXX.zip) && \
+		tmpzip=$$(mktemp /tmp/notarize-XXXXXX.zip) && rm -f "$$tmpzip" && \
 		zip -j "$$tmpzip" dist/$(BINARY)-darwin-arm64 && \
 		if [ -n "$$APPLE_NOTARY_PROFILE" ]; then \
 			xcrun notarytool submit "$$tmpzip" \
