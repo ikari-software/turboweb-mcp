@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -43,6 +44,14 @@ type updateStatus struct {
 	assetURL  string
 	assetName string
 	sumsURL   string
+	// chromeZipURL is the chrome extension zip download URL from the release.
+	chromeZipURL string
+
+	// Extension directory info (exported for check_for_updates consumers).
+	// ExtensionDir is the load-unpacked chrome directory found on this host,
+	// ExtensionVersion is its current manifest version.
+	ExtensionDir     string `json:"extensionDir,omitempty"`
+	ExtensionVersion string `json:"extensionVersion,omitempty"`
 }
 
 var (
@@ -154,10 +163,17 @@ func fetchLatestRelease() *updateStatus {
 			st.assetURL = a.URL
 		case "SHA256SUMS":
 			st.sumsURL = a.URL
+		case "turboweb-mcp-by-ikari-extension-chrome.zip":
+			st.chromeZipURL = a.URL
 		}
 	}
 	if st.UpdateAvailable && st.assetURL == "" {
 		st.Error = fmt.Sprintf("release %s ships no %s asset", rel.TagName, wantAsset)
+	}
+	// Populate the extension directory info for check_for_updates consumers.
+	if dir := findChromeExtensionDistDir(); dir != "" {
+		st.ExtensionDir = dir
+		st.ExtensionVersion = extensionDirVersion(dir)
 	}
 	return st
 }
@@ -226,10 +242,12 @@ func startUpdateChecker() {
 
 // updateResult is the outcome of a self-update attempt.
 type updateResult struct {
-	Updated     bool   `json:"updated"`
-	FromVersion string `json:"fromVersion"`
-	ToVersion   string `json:"toVersion"`
-	Message     string `json:"message"`
+	Updated          bool   `json:"updated"`
+	FromVersion      string `json:"fromVersion"`
+	ToVersion        string `json:"toVersion"`
+	Message          string `json:"message"`
+	ExtensionUpdated bool   `json:"extensionUpdated,omitempty"`
+	ExtensionDir     string `json:"extensionDir,omitempty"`
 }
 
 // performSelfUpdate downloads the latest release binary for this platform,
@@ -315,7 +333,126 @@ func performSelfUpdate() (updateResult, error) {
 	res.Updated = true
 	res.Message = fmt.Sprintf("updated %s → %s; the daemon respawns from the new binary on the next call, "+
 		"and MCP instances pick it up on next launch", serverVersion, st.LatestVersion)
+
+	// Extension update: find the loaded-unpacked Chrome extension directory and
+	// overwrite it with the files from the release chrome zip. The new files land
+	// on disk before the reload signal is sent, so Chrome picks up the new version
+	// in the same reload cycle.
+	// Firefox extensions are handled by AMO auto-update (update_url in the signed
+	// manifest) and do not need manual intervention here.
+	if extDir := findChromeExtensionDistDir(); extDir != "" && st.chromeZipURL != "" {
+		extVer := extensionDirVersion(extDir)
+		if compareVersions(st.LatestVersion, extVer) > 0 {
+			if extErr := extractChromeZip(st.chromeZipURL, extDir); extErr != nil {
+				logger.Printf("extension update at %s failed: %v", extDir, extErr)
+				res.Message += fmt.Sprintf("; extension update failed: %v", extErr)
+			} else {
+				res.ExtensionUpdated = true
+				res.ExtensionDir = extDir
+				broadcastExtensionReload(st.LatestVersion)
+				res.Message += fmt.Sprintf("; extension updated at %s — reloading in connected Chromium browsers", extDir)
+			}
+		}
+	}
+
 	return res, nil
+}
+
+// --- Extension update helpers ---
+
+// findChromeExtensionDistDir returns the path to the built chrome extension
+// dist directory (…/extension/dist/chrome). It builds on findExtensionDir
+// (browser.go), which locates the extension source directory, and appends
+// the dist/chrome suffix. $TURBOWEB_EXTENSION_DIR overrides the whole path.
+func findChromeExtensionDistDir() string {
+	if dir := os.Getenv("TURBOWEB_EXTENSION_DIR"); dir != "" {
+		fi, err := os.Stat(filepath.Join(dir, "manifest.json"))
+		if err == nil && !fi.IsDir() {
+			return dir
+		}
+	}
+	src := findExtensionDir() // from browser.go: finds extension/ source dir
+	if src == "" {
+		return ""
+	}
+	dist := filepath.Join(src, "dist", "chrome")
+	fi, err := os.Stat(filepath.Join(dist, "manifest.json"))
+	if err != nil || fi.IsDir() {
+		return ""
+	}
+	return dist
+}
+
+// extensionDirVersion reads manifest.json from dir and returns its "version" field.
+func extensionDirVersion(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return ""
+	}
+	return m.Version
+}
+
+// extractChromeZip downloads the chrome extension zip from zipURL and extracts
+// it into destDir, stripping the leading "chrome/" path prefix that the
+// Makefile's zip command produces (zip -qr ... chrome/).
+func extractChromeZip(zipURL, destDir string) error {
+	tmp, err := os.CreateTemp("", "turboweb-ext-*.zip")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := downloadTo(tmp, zipURL); err != nil {
+		tmp.Close()
+		return fmt.Errorf("extension zip download failed: %w", err)
+	}
+	tmp.Close()
+
+	zr, err := zip.OpenReader(tmpPath)
+	if err != nil {
+		return fmt.Errorf("cannot open extension zip: %w", err)
+	}
+	defer zr.Close()
+
+	destDir = filepath.Clean(destDir)
+	for _, f := range zr.File {
+		// Strip leading "chrome/" prefix produced by the Makefile.
+		rel := strings.TrimPrefix(filepath.ToSlash(f.Name), "chrome/")
+		if rel == "" || strings.HasSuffix(rel, "/") {
+			continue // directory entry — created implicitly via MkdirAll
+		}
+		dest := filepath.Join(destDir, filepath.FromSlash(rel))
+		// Guard against zip-slip attacks.
+		if !strings.HasPrefix(dest, destDir+string(os.PathSeparator)) {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(dest)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, rc)
+		rc.Close()
+		out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+	}
+	return nil
 }
 
 // downloadTo streams url into w and returns the hex-encoded SHA-256 of the

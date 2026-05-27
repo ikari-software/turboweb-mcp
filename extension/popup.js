@@ -21,15 +21,36 @@ port.onMessage.addListener((msg) => {
     case 'status':       renderStatus(msg); break;
     case 'activity':     renderActivity(msg); break;
     case 'stats':        renderStats(msg); break;
-    case 'mcp_clients':  renderClients(msg.clients || []); break;
+    case 'mcp_clients':
+      renderClients(msg.clients || []);
+      if (typeof msg.serverVersion === 'string') renderVersions(msg.serverVersion);
+      break;
     case 'log-batch':    msg.entries.forEach(e => renderActivity(e)); break;
   }
 });
 
-// Show the version straight from the manifest so the header never drifts
-// from the actual build — manifest.json is the single source the build
-// derives every artifact from.
-document.getElementById('ver').textContent = 'MCP v' + chrome.runtime.getManifest().version;
+// renderVersions updates the header version chip. When extension and backend
+// versions match, shows a compact "v1.8.2". When they differ (e.g. after a
+// partial update) both are shown and the chip turns amber.
+function renderVersions(serverVer) {
+  const extVer = chrome.runtime.getManifest().version;
+  const el = document.getElementById('ver');
+  if (!serverVer || serverVer === extVer) {
+    el.textContent = 'v' + extVer;
+    el.title = serverVer
+      ? 'Extension and backend both at v' + extVer
+      : 'Extension v' + extVer + ' (backend version unknown)';
+    el.style.color = '';
+  } else {
+    el.textContent = 'ext ' + extVer + ' · srv ' + serverVer;
+    el.title = 'Extension v' + extVer + ', backend v' + serverVer + ' — versions differ';
+    el.style.color = '#e3b341'; // amber: mismatch warning
+  }
+}
+
+// Show the extension version immediately from the manifest; backend version
+// is filled in once the first mcp_clients message arrives.
+document.getElementById('ver').textContent = 'v' + chrome.runtime.getManifest().version;
 
 // Request current state
 port.postMessage({ type: 'getState' });

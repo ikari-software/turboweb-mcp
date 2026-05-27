@@ -262,6 +262,24 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// broadcastExtensionReload sends a reload_extension message to every connected
+// browser. The extension's background service worker calls chrome.runtime.reload()
+// on receipt, picking up freshly extracted files from the extension directory.
+func broadcastExtensionReload(version string) {
+	msg, _ := json.Marshal(map[string]string{"type": "reload_extension", "version": version})
+	browsersMu.RLock()
+	conns := make([]*BrowserConnection, 0, len(browsers))
+	for _, bc := range browsers {
+		conns = append(conns, bc)
+	}
+	browsersMu.RUnlock()
+	for _, bc := range conns {
+		bc.mu.Lock()
+		_ = bc.conn.WriteMessage(websocket.TextMessage, msg)
+		bc.mu.Unlock()
+	}
+}
+
 // broadcastDebounce coalesces a burst of broadcastClientsToBrowsers() calls
 // into a single push. Fan-out across N relay clients × M browsers can storm
 // when editors flap (CI spawning short-lived MCP processes, the user opening
@@ -324,7 +342,7 @@ func doBroadcastClientsToBrowsers() {
 		clients = append(clients, snapshotSession())
 	}
 
-	msg, _ := json.Marshal(map[string]any{"type": "mcp_clients", "clients": clients})
+	msg, _ := json.Marshal(map[string]any{"type": "mcp_clients", "clients": clients, "serverVersion": serverVersion})
 
 	browsersMu.RLock()
 	conns := make([]*BrowserConnection, 0, len(browsers))

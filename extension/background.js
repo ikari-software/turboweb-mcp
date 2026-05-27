@@ -25,6 +25,8 @@ const popupPorts = new Set();
 // server sends an unsolicited `mcp_clients` push whenever this list changes,
 // and we replay it to the popup so the user sees who is driving the browser.
 let mcpClients = [];
+// Backend server version, reported in every mcp_clients push.
+let mcpServerVersion = '';
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'popup') return;
@@ -34,7 +36,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg.type === 'getState') {
       port.postMessage({ type: 'status', connected: ws?.readyState === WebSocket.OPEN, browsers: 'active' });
       port.postMessage({ type: 'stats', ...getStats() });
-      port.postMessage({ type: 'mcp_clients', clients: mcpClients });
+      port.postMessage({ type: 'mcp_clients', clients: mcpClients, serverVersion: mcpServerVersion });
       port.postMessage({ type: 'log-batch', entries: activityLog.slice(-50) });
     }
     if (msg.type === 'getStats') {
@@ -244,7 +246,19 @@ function connect() {
     // Server-initiated push messages (no `id`, has `type`).
     if (msg.type === 'mcp_clients') {
       mcpClients = Array.isArray(msg.clients) ? msg.clients : [];
-      broadcast({ type: 'mcp_clients', clients: mcpClients });
+      mcpServerVersion = typeof msg.serverVersion === 'string' ? msg.serverVersion : mcpServerVersion;
+      broadcast({ type: 'mcp_clients', clients: mcpClients, serverVersion: mcpServerVersion });
+      return;
+    }
+
+    // Extension reload request: new files have been extracted to the extension
+    // directory on disk by the Go self-updater. Reload so Chrome picks them up.
+    if (msg.type === 'reload_extension') {
+      const v = msg.version ? ` v${msg.version}` : '';
+      console.log(`[turbo] Reloading extension${v} as requested by server`);
+      // Brief delay so the server's own response flush completes before the
+      // WS connection disappears from under it.
+      setTimeout(() => chrome.runtime.reload(), 300);
       return;
     }
 

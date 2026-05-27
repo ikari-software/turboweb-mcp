@@ -1,5 +1,5 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.8.2
+VERSION = 1.8.3
 GITHUB_REPO = ikari-software/turboweb-mcp
 
 # Install prefix — defaults to the Homebrew prefix when `brew` is on PATH
@@ -19,7 +19,7 @@ PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
 # different path — exec returns SIGKILL with no stderr. Re-signing in
 # place gives the binary a fresh cdhash amfid accepts.
 build: extension
-	go build -ldflags="-s -w" -o bin/$(BINARY) .
+	go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o bin/$(BINARY) .
 	@if [ "$$(uname)" = "Darwin" ]; then codesign -s - --force bin/$(BINARY) >/dev/null 2>&1; fi
 
 install: build
@@ -40,10 +40,10 @@ install: build
 # Upload with `gh release create vX.Y.Z dist/*`.
 release: extension extension-zip extension-xpi firefox-updates-json
 	@mkdir -p dist
-	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" -o dist/$(BINARY)-darwin-arm64 .
-	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w" -o dist/$(BINARY)-linux-amd64 .
-	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/$(BINARY)-windows-amd64.exe .
-	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w" -o dist/$(BINARY)-windows-arm64.exe .
+	GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-darwin-arm64 .
+	GOOS=linux   GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-linux-amd64 .
+	GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-amd64.exe .
+	GOOS=windows GOARCH=arm64 go build -ldflags="-s -w -X main.serverVersion=$(VERSION)" -o dist/$(BINARY)-windows-arm64.exe .
 
 # One-shot rebuild of the loadable extension into extension/dist/{chrome,firefox}/.
 extension:
