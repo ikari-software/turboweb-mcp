@@ -1,5 +1,5 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.8.5
+VERSION = 1.9.0
 GITHUB_REPO = ikari-software/turboweb-mcp
 
 # Install prefix — defaults to the Homebrew prefix when `brew` is on PATH
