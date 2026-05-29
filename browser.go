@@ -108,10 +108,7 @@ func launchBrowser(headless bool) (int, error) {
 	go cmd.Wait()
 
 	pid := cmd.Process.Pid
-	browserName := "Chrome"
-	if firefox {
-		browserName = "Firefox"
-	}
+	browserName := browserDisplayName(chromePath)
 	logger.Printf("Launched %s (pid %d, debug port %d)", browserName, pid, debugPort)
 	if firefox && extPath != "" {
 		logger.Printf("Firefox: unpacked extension cannot be auto-loaded from CLI; install %s once via about:debugging (This Firefox).", extPath)
@@ -146,10 +143,46 @@ func ensureBrowser() error {
 	return err
 }
 
-// isFirefoxPath returns true if the binary path looks like a Firefox executable.
+// isFirefoxPath returns true if the binary path looks like a Firefox-family executable.
 func isFirefoxPath(path string) bool {
-	lower := strings.ToLower(filepath.Base(path))
-	return strings.Contains(lower, "firefox")
+	base := strings.ToLower(filepath.Base(path))
+	return strings.Contains(base, "firefox") ||
+		isZenPath(path) ||
+		strings.Contains(base, "librewolf") ||
+		strings.Contains(base, "waterfox")
+}
+
+func browserDisplayName(path string) string {
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case isZenPath(path):
+		return "Zen"
+	case strings.Contains(base, "firefox"):
+		return "Firefox"
+	case strings.Contains(base, "librewolf"):
+		return "LibreWolf"
+	case strings.Contains(base, "waterfox"):
+		return "Waterfox"
+	case strings.Contains(base, "brave"):
+		return "Brave"
+	case strings.Contains(base, "arc"):
+		return "Arc"
+	case strings.Contains(base, "edge") || strings.Contains(base, "msedge"):
+		return "Edge"
+	case strings.Contains(base, "chromium"):
+		return "Chromium"
+	default:
+		return "Chrome"
+	}
+}
+
+func isZenPath(path string) bool {
+	lower := strings.ToLower(path)
+	base := strings.TrimSuffix(strings.ToLower(filepath.Base(path)), ".exe")
+	return base == "zen" ||
+		strings.HasPrefix(base, "zen-") ||
+		strings.Contains(lower, "zen browser.app") ||
+		strings.Contains(lower, "zen browser")
 }
 
 // findFreePort returns a free TCP port by binding to :0 and reading the assigned port.
@@ -173,6 +206,7 @@ func findChrome() string {
 			"/Applications/Chromium.app/Contents/MacOS/Chromium",
 			"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
 			"/Applications/Arc.app/Contents/MacOS/Arc",
+			"/Applications/Zen Browser.app/Contents/MacOS/zen",
 			"/Applications/Firefox.app/Contents/MacOS/firefox",
 			"/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
 		}
@@ -182,7 +216,7 @@ func findChrome() string {
 			}
 		}
 	case "linux":
-		names := []string{"google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "brave-browser", "firefox", "firefox-developer-edition"}
+		names := []string{"google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "brave-browser", "zen-browser", "zen", "firefox", "firefox-developer-edition"}
 		for _, name := range names {
 			if p, err := exec.LookPath(name); err == nil {
 				return p
@@ -193,6 +227,8 @@ func findChrome() string {
 			filepath.Join(os.Getenv("PROGRAMFILES"), "Google", "Chrome", "Application", "chrome.exe"),
 			filepath.Join(os.Getenv("PROGRAMFILES(X86)"), "Google", "Chrome", "Application", "chrome.exe"),
 			filepath.Join(os.Getenv("LOCALAPPDATA"), "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "Zen Browser", "zen.exe"),
+			filepath.Join(os.Getenv("PROGRAMFILES"), "Zen Browser", "zen.exe"),
 		}
 		for _, p := range paths {
 			if _, err := os.Stat(p); err == nil {
