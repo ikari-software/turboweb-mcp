@@ -29,3 +29,6 @@ nc_disclosure_training_transcript.txt
 .omc/
 .claude/
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/

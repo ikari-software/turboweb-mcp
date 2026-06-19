@@ -20,11 +20,26 @@ type BiDiContextInfo struct {
 }
 
 func bidiGetTree(ctx context.Context) ([]BiDiContextInfo, error) {
+	return bidiGetTreeFrom(ctx, "", 0)
+}
+
+// bidiGetTreeFrom queries browsingContext.getTree scoped to a root context and
+// depth. An empty root returns all top-level contexts; maxDepth<=0 omits the
+// limit (full tree). Used by frame resolution to read a context's immediate
+// children (root=ctxID, maxDepth=1).
+func bidiGetTreeFrom(ctx context.Context, root string, maxDepth int) ([]BiDiContextInfo, error) {
 	c, err := requireBiDi()
 	if err != nil {
 		return nil, err
 	}
-	raw, err := c.Send(ctx, "browsingContext.getTree", map[string]any{})
+	params := map[string]any{}
+	if root != "" {
+		params["root"] = root
+	}
+	if maxDepth > 0 {
+		params["maxDepth"] = maxDepth
+	}
+	raw, err := c.Send(ctx, "browsingContext.getTree", params)
 	if err != nil {
 		return nil, err
 	}

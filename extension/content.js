@@ -23,12 +23,16 @@
   // at the thing the agent meant to click.
   function sel(el) {
     if (!el || !el.tagName) return '';
+    // Resolve uniqueness against the element's OWN document, not the global
+    // top-frame `document` — otherwise selectors generated for elements inside
+    // a (same-origin) child frame would be validated against the wrong tree.
+    const ownerDoc = el.ownerDocument || document;
     // Local helper: true iff `s` matches exactly one element AND that
     // element is the target. Used to confirm uniqueness at each level
     // of the walk-up chain below.
     const isUnique = (s) => {
       try {
-        const m = document.querySelectorAll(s);
+        const m = ownerDoc.querySelectorAll(s);
         return m.length === 1 && m[0] === el;
       } catch { return false; }
     };
@@ -46,7 +50,7 @@
 
     const parts = [];
     let cur = el;
-    for (let depth = 0; depth < 15 && cur && cur !== document.body && cur !== document.documentElement; depth++) {
+    for (let depth = 0; depth < 15 && cur && cur !== ownerDoc.body && cur !== ownerDoc.documentElement; depth++) {
       let segment;
       if (cur.id) {
         segment = '#' + CSS.escape(cur.id);
@@ -98,18 +102,163 @@
     };
   }
 
+  // --- Cross-iframe support ---------------------------------------------
+  // content.js runs only in the top frame (manifest all_frames:false), but it
+  // CAN reach SAME-ORIGIN child frames through their contentDocument. These
+  // helpers let every DOM tool target a nested frame and keep the coordinates
+  // it reports viewport-relative — so a query inside a frame round-trips to a
+  // later coordinate click. Cross-origin frames are opaque here; the cdp_*
+  // tools (real input via BiDi) pierce those natively.
+  //
+  // A `frame` spec is a framePath: a ">"-separated list of CSS selectors, each
+  // resolving an <iframe>/<frame> within the previous frame's document, e.g.
+  //   "#top_frame"  or  "#top_frame > #csframe".
+
+  // getComputedStyle bound to an element's own window (cross-document safe).
+  function gcs(el) {
+    const v = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+    return v.getComputedStyle(el);
+  }
+
+  // A short, resolvable selector segment for a frame element. Prefers id / name
+  // (framesets almost always name their frames); falls back to a unique path.
+  function frameSeg(el) {
+    if (el.id) return '#' + CSS.escape(el.id);
+    const nm = el.getAttribute && el.getAttribute('name');
+    if (nm) return el.tagName.toLowerCase() + '[name=' + JSON.stringify(nm) + ']';
+    return sel(el);
+  }
+
+  // Origin of a frame's content viewport within its parent document, including
+  // the frame's own border + padding (where the child viewport actually begins).
+  function frameContentOrigin(el) {
+    const r = el.getBoundingClientRect();
+    const cs = gcs(el);
+    return {
+      x: r.left + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0),
+      y: r.top + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.paddingTop) || 0),
+    };
+  }
+
+  // Resolve a frame spec to its document + cumulative viewport offset. Returns
+  // { doc, win, offset, framePath, isSameOrigin }. `doc` is null when a segment
+  // is cross-origin (isSameOrigin:false). With no spec, returns the top frame.
+  function resolveRoot(frameSpec) {
+    if (!frameSpec) {
+      return { doc: document, win: window, offset: { x: 0, y: 0 }, framePath: '', isSameOrigin: true };
+    }
+    const segments = String(frameSpec).split('>').map(s => s.trim()).filter(Boolean);
+    let doc = document, win = window, offX = 0, offY = 0;
+    const parts = [];
+    for (const segSel of segments) {
+      let frameEl;
+      try { frameEl = doc.querySelector(segSel); }
+      catch { throw new Error('Invalid frame selector: ' + JSON.stringify(segSel)); }
+      const where = parts.length ? ' (within ' + parts.join(' > ') + ')' : '';
+      if (!frameEl) throw new Error('Frame not found: ' + segSel + where);
+      if (frameEl.tagName !== 'IFRAME' && frameEl.tagName !== 'FRAME') {
+        throw new Error('Not a frame: ' + segSel + ' resolved to <' + frameEl.tagName.toLowerCase() + '>');
+      }
+      const o = frameContentOrigin(frameEl);
+      offX += o.x; offY += o.y;
+      parts.push(frameSeg(frameEl));
+      let childDoc = null;
+      try { childDoc = frameEl.contentDocument; } catch { childDoc = null; }
+      if (!childDoc) {
+        return { doc: null, win: frameEl.contentWindow || null, offset: { x: offX, y: offY }, framePath: parts.join(' > '), isSameOrigin: false };
+      }
+      doc = childDoc; win = frameEl.contentWindow || win;
+    }
+    return { doc, win, offset: { x: offX, y: offY }, framePath: parts.join(' > '), isSameOrigin: true };
+  }
+
+  // Resolve a frame spec and assert the content script can actually read it.
+  // Returns { root, off, framePath }. Throws an actionable error for cross-origin.
+  function frameCtx(frameSpec) {
+    const r = resolveRoot(frameSpec);
+    if (!r.doc) {
+      throw new Error(
+        'Frame "' + r.framePath + '" is cross-origin — the content script cannot read into it. ' +
+        'Use cdp_click / cdp_type / cdp_scroll (real input via BiDi pierces cross-origin frames), ' +
+        'or target a same-origin frame.'
+      );
+    }
+    return { root: r.doc, off: r.offset, framePath: r.framePath };
+  }
+
+  // Hit-test that descends through SAME-ORIGIN iframes. Standard
+  // document.elementFromPoint returns the <iframe> element itself; this recurses
+  // into the frame's contentDocument (translating the point by the frame's
+  // content origin) and returns the real leaf element plus the frame it lives in.
+  function deepElementFromPoint(x, y) {
+    let doc = document, offX = 0, offY = 0, guard = 0;
+    const parts = [];
+    let el = doc.elementFromPoint(x, y);
+    while (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME') && guard++ < 16) {
+      let childDoc = null;
+      try { childDoc = el.contentDocument; } catch { childDoc = null; }
+      if (!childDoc) break; // cross-origin: the <iframe> element is as deep as we go
+      const o = frameContentOrigin(el);
+      offX += o.x; offY += o.y;
+      parts.push(frameSeg(el));
+      const inner = childDoc.elementFromPoint(x - offX, y - offY);
+      doc = childDoc;
+      if (!inner) { el = null; break; }
+      el = inner;
+    }
+    return { el, doc, offset: { x: offX, y: offY }, framePath: parts.join(' > ') };
+  }
+
+  // --- list_frames: enumerate the frame tree (same- and cross-origin) ---
+  function listFrames() {
+    const frames = [];
+    (function walk(doc, parentPath, parentOff, depth) {
+      if (depth > 16) return;
+      for (const el of doc.querySelectorAll('iframe,frame')) {
+        const seg = frameSeg(el);
+        const framePath = parentPath ? parentPath + ' > ' + seg : seg;
+        const r = el.getBoundingClientRect();
+        let childDoc = null;
+        try { childDoc = el.contentDocument; } catch { childDoc = null; }
+        const sameOrigin = !!childDoc;
+        let url, origin;
+        try {
+          if (sameOrigin && childDoc.location) { url = childDoc.location.href; origin = childDoc.location.origin; }
+          else if (el.src) { origin = new URL(el.src, location.href).origin; }
+        } catch { /* opaque */ }
+        frames.push({
+          frameId: framePath,
+          framePath,
+          id: el.id || undefined,
+          name: (el.getAttribute && el.getAttribute('name')) || undefined,
+          src: el.src || undefined,
+          url: url || undefined,
+          origin: origin || undefined,
+          isSameOrigin: sameOrigin,
+          rect: { x: Math.round(parentOff.x + r.x), y: Math.round(parentOff.y + r.y), w: Math.round(r.width), h: Math.round(r.height) },
+        });
+        if (sameOrigin) {
+          const o = frameContentOrigin(el);
+          walk(childDoc, framePath, { x: parentOff.x + o.x, y: parentOff.y + o.y }, depth + 1);
+        }
+      }
+    })(document, '', { x: 0, y: 0 }, 0);
+    return { count: frames.length, frames };
+  }
+
   // --- Extract visible text with positions (DOM-based OCR) ---
   // Now supports: selector scope, region filter {rx,ry,rw,rh}, and max results
-  function extractText({ selector, region, max = 500 } = {}) {
-    const root = selector ? document.querySelector(selector) : document.body;
+  function extractText({ selector, region, max = 500, frame } = {}) {
+    const { root: fdoc, off, framePath } = frameCtx(frame);
+    const root = selector ? fdoc.querySelector(selector) : fdoc.body;
     if (!root) throw new Error('Element not found: ' + selector);
 
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    const walker = fdoc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         if (!node.textContent.trim()) return NodeFilter.FILTER_REJECT;
         const el = node.parentElement;
         if (!el) return NodeFilter.FILTER_REJECT;
-        const st = getComputedStyle(el);
+        const st = gcs(el);
         if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
@@ -136,25 +285,26 @@
       if (!text) continue;
       out.push({
         text: text.substring(0, 500),
-        x: Math.round(r.x), y: Math.round(r.y),
+        x: Math.round(r.x + off.x), y: Math.round(r.y + off.y),
         w: Math.round(r.width), h: Math.round(r.height),
         tag: el.tagName.toLowerCase(),
       });
     }
-    return { viewport: viewport(), count: out.length, blocks: out };
+    return { viewport: viewport(), frame: framePath || undefined, count: out.length, blocks: out };
   }
 
   // --- Find elements by visible text (like Cmd+F but structured) ---
-  function findText({ query, max = 20, caseSensitive = false }) {
+  function findText({ query, max = 20, caseSensitive = false, frame }) {
     if (!query) throw new Error('query is required');
+    const { root: fdoc, off, framePath } = frameCtx(frame);
     const q = caseSensitive ? query : query.toLowerCase();
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+    const walker = fdoc.createTreeWalker(fdoc.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const t = caseSensitive ? node.textContent : node.textContent.toLowerCase();
         if (!t.includes(q)) return NodeFilter.FILTER_REJECT;
         const el = node.parentElement;
         if (!el) return NodeFilter.FILTER_REJECT;
-        const st = getComputedStyle(el);
+        const st = gcs(el);
         if (st.display === 'none' || st.visibility === 'hidden') return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
@@ -170,34 +320,40 @@
       const r = el.getBoundingClientRect();
       out.push({
         text: el.innerText.substring(0, 300),
-        x: Math.round(r.x), y: Math.round(r.y),
+        x: Math.round(r.x + off.x), y: Math.round(r.y + off.y),
         w: Math.round(r.width), h: Math.round(r.height),
         tag: el.tagName.toLowerCase(),
         selector: sel(el),
       });
     }
-    return { query, found: out.length, results: out };
+    return { query, frame: framePath || undefined, found: out.length, results: out };
   }
 
   // --- Inspect: deep one-shot inspection of an element ---
   // Find by selector, coordinates, or text search. Returns everything useful in one call.
-  function inspectElement({ selector, x, y, text: searchText, depth = 2 }) {
-    let el;
+  function inspectElement({ selector, x, y, text: searchText, depth = 2, frame }) {
+    let el, off = { x: 0, y: 0 }, framePath = '';
     if (selector) {
-      el = document.querySelector(selector);
+      const ctx = frameCtx(frame); off = ctx.off; framePath = ctx.framePath;
+      el = ctx.root.querySelector(selector);
     } else if (x !== undefined && y !== undefined) {
-      el = document.elementFromPoint(x, y);
+      // Coordinate hit-test descends through same-origin iframes so x,y no
+      // longer stops at the <iframe> wrapper.
+      const hit = deepElementFromPoint(x, y);
+      el = hit.el; off = hit.offset; framePath = hit.framePath;
     } else if (searchText) {
+      const ctx = frameCtx(frame); off = ctx.off; framePath = ctx.framePath;
       // Find first element containing this text
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      const walker = ctx.root.createTreeWalker(ctx.root.body, NodeFilter.SHOW_TEXT, {
         acceptNode(n) { return n.textContent.includes(searchText) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; }
       });
       if (walker.nextNode()) el = walker.currentNode.parentElement;
     }
     if (!el) throw new Error('Element not found');
+    const ownerDoc = el.ownerDocument || document;
 
     const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
+    const cs = gcs(el);
 
     // Gather attributes
     const attrs = {};
@@ -206,13 +362,13 @@
     // Parent chain (compact)
     const parents = [];
     let cur = el.parentElement;
-    for (let i = 0; i < 5 && cur && cur !== document.documentElement; i++) {
+    for (let i = 0; i < 5 && cur && cur !== ownerDoc.documentElement; i++) {
       const pr = cur.getBoundingClientRect();
       parents.push({
         tag: cur.tagName.toLowerCase(),
         id: cur.id || undefined,
         cls: (cur.className || '').toString().split(/\s+/).filter(c => c.length < 40).slice(0, 3).join(' ') || undefined,
-        rect: { x: Math.round(pr.x), y: Math.round(pr.y), w: Math.round(pr.width), h: Math.round(pr.height) },
+        rect: { x: Math.round(pr.x + off.x), y: Math.round(pr.y + off.y), w: Math.round(pr.width), h: Math.round(pr.height) },
       });
       cur = cur.parentElement;
     }
@@ -227,7 +383,7 @@
         const entry = {
           tag: c.tagName.toLowerCase(),
           text: (c.innerText || '').substring(0, 120).replace(/\n/g, ' '),
-          rect: { x: Math.round(cr.x), y: Math.round(cr.y), w: Math.round(cr.width), h: Math.round(cr.height) },
+          rect: { x: Math.round(cr.x + off.x), y: Math.round(cr.y + off.y), w: Math.round(cr.width), h: Math.round(cr.height) },
         };
         if (c.id) entry.id = c.id;
         const sub = summarizeChildren(c, d + 1);
@@ -248,7 +404,7 @@
         siblings.push({
           tag: sibs[i].tagName.toLowerCase(),
           text: (sibs[i].innerText || '').substring(0, 100).replace(/\n/g, ' '),
-          rect: { x: Math.round(sr.x), y: Math.round(sr.y), w: Math.round(sr.width), h: Math.round(sr.height) },
+          rect: { x: Math.round(sr.x + off.x), y: Math.round(sr.y + off.y), w: Math.round(sr.width), h: Math.round(sr.height) },
         });
       }
     }
@@ -256,7 +412,8 @@
     return {
       tag: el.tagName.toLowerCase(),
       text: (el.innerText || '').substring(0, 1000),
-      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      frame: framePath || undefined,
+      rect: { x: Math.round(r.x + off.x), y: Math.round(r.y + off.y), w: Math.round(r.width), h: Math.round(r.height) },
       selector: sel(el),
       attrs,
       style: {
@@ -272,22 +429,25 @@
   }
 
   // --- Interactive element map with spatial positions ---
-  function getInteractiveMap() {
+  function getInteractiveMap({ frame } = {}) {
+    const { root: fdoc, off, framePath } = frameCtx(frame);
     const Q = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="tab"],[role="menuitem"],[role="checkbox"],[role="radio"],[role="switch"],[onclick],[tabindex]:not([tabindex="-1"]),summary,[contenteditable="true"]';
-    const els = document.querySelectorAll(Q);
+    const els = fdoc.querySelectorAll(Q);
     const items = [];
 
     for (const el of els) {
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
-      // Skip offscreen
-      if (r.bottom < 0 || r.top > window.innerHeight + 100) continue;
-      if (r.right < 0 || r.left > window.innerWidth + 100) continue;
+      // Skip offscreen — compare against the TOP viewport using the frame offset,
+      // so a control inside a scrolled-off frame is correctly excluded.
+      const top = r.top + off.y, bottom = r.bottom + off.y, left = r.left + off.x, right = r.right + off.x;
+      if (bottom < 0 || top > window.innerHeight + 100) continue;
+      if (right < 0 || left > window.innerWidth + 100) continue;
 
       const item = {
         tag: el.tagName.toLowerCase(),
         text: (el.textContent || '').trim().substring(0, 120),
-        x: Math.round(r.x), y: Math.round(r.y),
+        x: Math.round(r.x + off.x), y: Math.round(r.y + off.y),
         w: Math.round(r.width), h: Math.round(r.height),
         selector: sel(el),
       };
@@ -339,7 +499,7 @@
       }
     }
 
-    return { viewport: viewport(), elements: items };
+    return { viewport: viewport(), frame: framePath || undefined, elements: items };
   }
 
   // --- Form-field metadata ---
@@ -386,8 +546,9 @@
   }
 
   // --- CSS selector query with positions ---
-  function queryElements({ selector, limit = 50 }) {
-    const els = document.querySelectorAll(selector);
+  function queryElements({ selector, limit = 50, frame }) {
+    const { root: fdoc, off, framePath } = frameCtx(frame);
+    const els = fdoc.querySelectorAll(selector);
     const out = [];
     let i = 0;
     for (const el of els) {
@@ -398,7 +559,7 @@
       const item = {
         tag: el.tagName.toLowerCase(),
         text: (el.textContent || '').trim().substring(0, 300),
-        x: Math.round(r.x), y: Math.round(r.y),
+        x: Math.round(r.x + off.x), y: Math.round(r.y + off.y),
         w: Math.round(r.width), h: Math.round(r.height),
         attrs,
         selector: sel(el),
@@ -409,7 +570,7 @@
       if (field) item.field = field;
       out.push(item);
     }
-    return { viewport: viewport(), count: els.length, elements: out };
+    return { viewport: viewport(), frame: framePath || undefined, count: els.length, elements: out };
   }
 
   // --- Form inspection (try_url_prefill discovery + verification) ---
@@ -519,8 +680,8 @@
   // visible, one hidden in a collapsed section). "Visible" = offsetParent !== null.
   // Throws a descriptive error listing element IDs when every match is hidden,
   // so the caller knows to switch to an ID selector instead (Fix 1 + Fix 4).
-  function resolveVisible(selector) {
-    const matches = Array.from(document.querySelectorAll(selector));
+  function resolveVisible(selector, doc = document) {
+    const matches = Array.from(doc.querySelectorAll(selector));
     if (!matches.length) throw new Error('Element not found: ' + selector);
     const visible = matches.filter(el => el.offsetParent !== null);
     if (visible.length) {
@@ -535,20 +696,28 @@
   }
 
   // --- Click ---
-  function clickElement({ selector, x, y }) {
+  function clickElement({ selector, x, y, frame }) {
     let el;
     let selectorNote = null;
+    let off = { x: 0, y: 0 }, framePath = '';
     if (selector) {
-      const { el: resolved, hiddenSkipped } = resolveVisible(selector);
+      const ctx = frameCtx(frame); off = ctx.off; framePath = ctx.framePath;
+      const { el: resolved, hiddenSkipped } = resolveVisible(selector, ctx.root);
       el = resolved;
       if (hiddenSkipped > 0) selectorNote = `Skipped ${hiddenSkipped} hidden duplicate(s) — used ${el.id ? '#' + el.id : sel(el)}`;
     } else if (x !== undefined && y !== undefined) {
-      el = document.elementFromPoint(x, y);
+      // Hit-test descends through same-origin iframes — a coordinate click no
+      // longer stops at the <iframe> wrapper and lands on the real leaf element.
+      const hit = deepElementFromPoint(x, y);
+      el = hit.el; off = hit.offset; framePath = hit.framePath;
       if (!el) throw new Error(`No element at (${x}, ${y})`);
     } else {
       throw new Error('Provide selector or x,y coordinates');
     }
 
+    // r/cx/cy are in the target element's OWN document — the synthetic events
+    // must carry document-local clientX/clientY. Reported coordinates are
+    // offset back to the top viewport so they round-trip.
     const r = el.getBoundingClientRect();
     const cx = r.x + r.width / 2;
     const cy = r.y + r.height / 2;
@@ -578,8 +747,10 @@
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.dispatchEvent(new MouseEvent('click', opts));
 
-    const focused = document.activeElement === focusable && focusable !== document.body;
-    const out = { clicked: sel(el), x: Math.round(cx), y: Math.round(cy), focused };
+    const od = el.ownerDocument || document;
+    const focused = od.activeElement === focusable && focusable !== od.body;
+    const out = { clicked: sel(el), x: Math.round(cx + off.x), y: Math.round(cy + off.y), focused };
+    if (framePath) out.frame = framePath;
     if (selectorNote) out.note = selectorNote;
 
     // Hint when synthetic clicks tend to misfire — most often because the
@@ -679,18 +850,21 @@
   }
 
   // --- Type text ---
-  function typeText({ selector, text, clear = false, pressEnter = false }) {
+  function typeText({ selector, text, clear = false, pressEnter = false, frame }) {
     let el, selectorNote = null;
+    const ctx = frameCtx(frame);
     if (selector) {
-      const { el: resolved, hiddenSkipped } = resolveVisible(selector);
+      const { el: resolved, hiddenSkipped } = resolveVisible(selector, ctx.root);
       el = resolved;
       if (hiddenSkipped > 0) selectorNote = `Skipped ${hiddenSkipped} hidden duplicate(s) — typed into ${el.id ? '#' + el.id : sel(el)}`;
     } else {
-      el = document.activeElement;
+      el = ctx.root.activeElement;
       if (!el) throw new Error('No active element to type into');
     }
 
     el.focus();
+    const ownerDoc = el.ownerDocument || document;
+    const ownerWin = ownerDoc.defaultView || window;
 
     const isField = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
 
@@ -703,9 +877,12 @@
       // change tracker sees a delta), then dispatch a bubbling `input` event
       // so the framework's handler reads the new value. `change` follows for
       // listeners (and <select>-style logic) that key off it.
+      // Use the element's OWN realm prototype — an element inside a child frame
+      // belongs to that frame's global, so the parent's HTMLInputElement setter
+      // would be the wrong realm.
       const proto = el.tagName === 'TEXTAREA'
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
+        ? (ownerWin.HTMLTextAreaElement || HTMLTextAreaElement).prototype
+        : (ownerWin.HTMLInputElement || HTMLInputElement).prototype;
       const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
       const next = clear ? text : (el.value + text);
       nativeSetter.call(el, next);
@@ -715,10 +892,10 @@
       // contenteditable / other editable hosts have no .value — execCommand
       // keeps caret semantics and fires the native input events.
       if (clear) {
-        document.execCommand('selectAll');
-        document.execCommand('delete');
+        ownerDoc.execCommand('selectAll');
+        ownerDoc.execCommand('delete');
       }
-      document.execCommand('insertText', false, text);
+      ownerDoc.execCommand('insertText', false, text);
     }
 
     if (pressEnter) {
@@ -754,9 +931,11 @@
   // delta, dispatches input+change events, and verifies the value stuck.
   // Works for <input>, <textarea>, and <select>. Use type_text for
   // contenteditable hosts (CKEditor, Quill, etc.).
-  function fillInput({ selector, value }) {
-    const { el, hiddenSkipped } = resolveVisible(selector);
+  function fillInput({ selector, value, frame }) {
+    const ctx = frameCtx(frame);
+    const { el, hiddenSkipped } = resolveVisible(selector, ctx.root);
     const tag = el.tagName;
+    const ownerWin = (el.ownerDocument && el.ownerDocument.defaultView) || window;
     if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
       throw new Error(
         `fill_input: <${tag.toLowerCase()}> is not a form field. ` +
@@ -775,7 +954,9 @@
       return out;
     }
 
-    const proto = tag === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const proto = tag === 'TEXTAREA'
+      ? (ownerWin.HTMLTextAreaElement || HTMLTextAreaElement).prototype
+      : (ownerWin.HTMLInputElement || HTMLInputElement).prototype;
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
     nativeSetter.call(el, value);
     el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -793,25 +974,29 @@
   }
 
   // --- Scroll ---
-  function scrollPage({ x, y, selector, direction, amount }) {
+  function scrollPage({ x, y, selector, direction, amount, frame }) {
+    const ctx = frameCtx(frame);
+    const fdoc = ctx.root;
+    const fwin = fdoc.defaultView || window;
     if (selector) {
-      const el = document.querySelector(selector);
+      const el = fdoc.querySelector(selector);
       if (!el) throw new Error('Element not found: ' + selector);
       el.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
     } else if (direction) {
-      const dist = amount || window.innerHeight * 0.8;
+      const dist = amount || fwin.innerHeight * 0.8;
       const map = { up: [0, -dist], down: [0, dist], left: [-dist, 0], right: [dist, 0] };
       const [dx, dy] = map[direction] || [0, 0];
-      window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+      fwin.scrollBy({ left: dx, top: dy, behavior: 'instant' });
     } else {
-      window.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
+      fwin.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
     }
-    return { scrollX: Math.round(window.scrollX), scrollY: Math.round(window.scrollY) };
+    return { scrollX: Math.round(fwin.scrollX), scrollY: Math.round(fwin.scrollY), frame: ctx.framePath || undefined };
   }
 
   // --- Get HTML (with depth/length limits) ---
-  function getHTML({ selector, outer = false, maxDepth = 0, maxLength = 200000 }) {
-    const el = selector ? document.querySelector(selector) : document.documentElement;
+  function getHTML({ selector, outer = false, maxDepth = 0, maxLength = 200000, frame }) {
+    const { root: fdoc, framePath } = frameCtx(frame);
+    const el = selector ? fdoc.querySelector(selector) : fdoc.documentElement;
     if (!el) throw new Error('Element not found: ' + selector);
 
     let html;
@@ -822,7 +1007,7 @@
       html = outer ? el.outerHTML : el.innerHTML;
     }
     const clamped = Math.min(Math.max(maxLength, 1000), 500000);
-    return { html: html.substring(0, clamped), truncated: html.length > clamped, length: html.length };
+    return { html: html.substring(0, clamped), truncated: html.length > clamped, length: html.length, frame: framePath || undefined };
   }
 
   function depthLimitedHTML(el, maxDepth, outer = false) {
@@ -854,8 +1039,9 @@
 
   // --- YAML Structure: semantic page representation ---
   // More logical than HTML, strips noise, shows structure + content + spatial info
-  function getPageStructure({ selector, maxDepth = 6, visibleOnly = true, timeLimitMs = 5000 }) {
-    const root = selector ? document.querySelector(selector) : document.body;
+  function getPageStructure({ selector, maxDepth = 6, visibleOnly = true, timeLimitMs = 5000, frame }) {
+    const { root: fdoc, off, framePath } = frameCtx(frame);
+    const root = selector ? fdoc.querySelector(selector) : fdoc.body;
     if (!root) throw new Error('Element not found: ' + selector);
 
     const deadline = Date.now() + timeLimitMs;
@@ -869,23 +1055,25 @@
     let lines = [];
     const vp = viewport();
     lines.push(`page:`);
-    lines.push(`  title: ${JSON.stringify(document.title)}`);
-    lines.push(`  url: ${JSON.stringify(location.href)}`);
+    lines.push(`  title: ${JSON.stringify(fdoc.title)}`);
+    lines.push(`  url: ${JSON.stringify((fdoc.location && fdoc.location.href) || location.href)}`);
+    if (framePath) lines.push(`  frame: ${JSON.stringify(framePath)}`);
     lines.push(`  viewport: {w: ${vp.w}, h: ${vp.h}}`);
     lines.push(`  scroll: {x: ${vp.scrollX}, y: ${vp.scrollY}}`);
     lines.push(`  content:`);
 
     function isVisible(el) {
       if (!visibleOnly) return true;
-      const st = getComputedStyle(el);
+      const st = gcs(el);
       if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
       // Also require the element to overlap the current viewport — elements
       // scrolled above/below the fold have negative or oversized y values and
       // can't be clicked without scrolling first, which makes their coordinates
       // confusing. Pass visibleOnly=false to include off-screen elements.
+      // Frame offset maps the frame-local rect into the top viewport.
       const r = el.getBoundingClientRect();
-      return r.bottom > 0 && r.top < window.innerHeight &&
-             r.right > 0 && r.left < window.innerWidth;
+      return (r.bottom + off.y) > 0 && (r.top + off.y) < window.innerHeight &&
+             (r.right + off.x) > 0 && (r.left + off.x) < window.innerWidth;
     }
 
     function directText(el) {
@@ -924,7 +1112,7 @@
     function posStr(el) {
       const r = el.getBoundingClientRect();
       if (r.width < 1 && r.height < 1) return '';
-      return ` @${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`;
+      return ` @${Math.round(r.x + off.x)},${Math.round(r.y + off.y)} ${Math.round(r.width)}x${Math.round(r.height)}`;
     }
 
     function processNode(el, indent, depth) {
@@ -2506,6 +2694,7 @@
       'find_text', 'extract_text', 'inspect', 'get_interactive_map',
       'get_html', 'page_yaml', 'get_page_structure', 'dom_snapshot',
       'get_accessibility_tree', 'query_elements', 'describe', 'turbo_snapshot',
+      'list_frames',
     ]);
 
     // Read-only / state-only ops that don't have a specific cursor
@@ -2525,6 +2714,7 @@
       ['dom_snapshot',        'sweep'],
       ['get_accessibility_tree', 'sweep'],
       ['query_elements',      'sweep'],
+      ['list_frames',         'sweep'],
       // Browser-state read → corner pulse
       ['get_cookies',         'pulse'],
       ['set_cookie',          'pulse'],
@@ -2923,8 +3113,9 @@
       extract_text: (p) => extractText(p),
       find_text: (p) => findText(p),
       inspect: (p) => inspectElement(p),
-      get_interactive_map: () => getInteractiveMap(),
+      get_interactive_map: (p) => getInteractiveMap(p),
       query_elements: (p) => queryElements(p),
+      list_frames: () => listFrames(),
       inspect_form: (p) => inspectForm(p),
       page_capabilities: () => pageCapabilities(),
       click: (p) => clickElement(p),

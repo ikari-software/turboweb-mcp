@@ -10,7 +10,38 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
+// frameOpt is the shared, optional `frame` parameter that scopes a DOM tool to
+// a (same-origin) iframe. It is forwarded verbatim to the extension, which
+// resolves it against the target frame's contentDocument and keeps reported
+// coordinates viewport-relative so a query inside a frame round-trips to a
+// later click. Cross-origin frames are not reachable through the content
+// script — the cdp_* tools pierce those natively.
+func frameOpt() mcp.ToolOption {
+	return mcp.WithString("frame", mcp.Description(
+		"Optional. Scope this call to an iframe. A framePath: a \">\"-separated list of CSS "+
+			"selectors, each resolving an <iframe>/<frame> within the previous frame's document "+
+			"(e.g. \"#top_frame\" or \"#top_frame > #csframe\"). Discover frames with list_frames. "+
+			"Same-origin frames work on every DOM tool. Cross-origin frames work only on the "+
+			"cdp_* tools, which dispatch real input into the frame's own browsing context via "+
+			"BiDi; other tools return a clear error for cross-origin. Coordinates stay "+
+			"top-viewport-relative either way.",
+	))
+}
+
 func registerDomTools(s *server.MCPServer) {
+	// --- list_frames ---
+	addTool(s,
+		mcp.NewTool("list_frames",
+			mcp.WithDescription("Enumerate the frame tree of the page. Returns every <iframe>/<frame> "+
+				"with {frameId, framePath, id, name, src, url, origin, isSameOrigin, rect}. framePath "+
+				"(e.g. \"#top_frame > #csframe\") is what you pass as the `frame` argument to other DOM "+
+				"tools to scope them to that frame. Same-origin frames are reachable by all tools; "+
+				"cross-origin frames (isSameOrigin:false) are only reachable via cdp_* (real input)."),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		handleListFrames,
+	)
+
 	// --- extract_text ---
 	addTool(s,
 		mcp.NewTool("extract_text",
@@ -28,6 +59,7 @@ func registerDomTools(s *server.MCPServer) {
 			),
 			mcp.WithNumber("max", mcp.Description("Max text blocks to return (default 500)")),
 			mcp.WithString("question", mcp.Description("If provided, Haiku preprocesses the data and returns a concise answer instead of raw JSON")),
+			frameOpt(),
 		),
 		handleExtractText,
 	)
@@ -41,6 +73,7 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithNumber("max", mcp.Description("Max results (default 20)")),
 			mcp.WithBoolean("caseSensitive", mcp.Description("Case sensitive search (default false)")),
 			mcp.WithString("question", mcp.Description("If provided, Haiku preprocesses the results and returns a concise answer")),
+			frameOpt(),
 		),
 		handleFindText,
 	)
@@ -56,6 +89,7 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithNumber("depth", mcp.Description("How deep to summarize children (default 2)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 			mcp.WithString("question", mcp.Description("If provided, Haiku answers this question about the element instead of returning raw data")),
+			frameOpt(),
 		),
 		handleInspect,
 	)
@@ -80,6 +114,7 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithNumber("maxDepth", mcp.Description("Max nesting depth (default 6)")),
 			mcp.WithBoolean("visibleOnly", mcp.Description("Only include visible elements (default true)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		handlePageYaml,
 	)
@@ -93,6 +128,7 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithNumber("maxDepth", mcp.Description("Max DOM depth to traverse. Deeper nodes get summarized. 0 = unlimited (default).")),
 			mcp.WithNumber("maxLength", mcp.Description("Max output length in chars (default 200000, max 500000)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		handleGetHTML,
 	)
@@ -102,6 +138,7 @@ func registerDomTools(s *server.MCPServer) {
 		mcp.NewTool("get_interactive_map",
 			mcp.WithDescription("Get ALL interactive elements (buttons, links, inputs, etc.) with their positions, text, selectors, and attributes. Spatial map for understanding page layout and available actions."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		handleGetInteractiveMap,
 	)
@@ -113,6 +150,7 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithString("selector", mcp.Required(), mcp.Description("CSS selector")),
 			mcp.WithNumber("limit", mcp.Description("Max elements to return (default 50)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		handleQueryElements,
 	)
@@ -318,6 +356,14 @@ func handleQueryElements(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 
 func handlePageCapabilities(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	raw, err := send("page_capabilities", rawArgs(req.GetArguments()))
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func handleListFrames(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	raw, err := send("list_frames", rawArgs(req.GetArguments()))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

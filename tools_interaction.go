@@ -32,6 +32,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithNumber("x", mcp.Description("X viewport coordinate (use when no selector applies)")),
 			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (pair with x)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		passThrough("click"),
 	)
@@ -45,6 +46,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithBoolean("clear", mcp.Description("Clear existing text first (default false)")),
 			mcp.WithBoolean("pressEnter", mcp.Description("Press Enter after typing (default false)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		passThrough("type_text"),
 	)
@@ -59,6 +61,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithNumber("x", mcp.Description("Horizontal pixel offset")),
 			mcp.WithNumber("y", mcp.Description("Vertical pixel offset")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		passThrough("scroll"),
 	)
@@ -81,6 +84,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (required if no selector)")),
 			mcp.WithBoolean("shift", mcp.Description("Hold Shift key during click (for multi-select)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		bidiOrFallback("cdp_click", handleBiDiClick),
 	)
@@ -98,6 +102,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithString("selector", mcp.Description("Optional CSS selector — focus this element before typing")),
 			mcp.WithBoolean("clear", mcp.Description("Select-all + delete before typing (default false)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		bidiOrFallback("cdp_type", handleBiDiType),
 	)
@@ -108,6 +113,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithDescription("Press a single key via real browser input. Supports: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab."),
 			mcp.WithString("key", mcp.Required(), mcp.Description("Key name: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		bidiOrFallback("cdp_key", handleBiDiKey),
 	)
@@ -131,6 +137,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			mcp.WithNumber("deltaX", mcp.Description("Horizontal scroll amount")),
 			mcp.WithNumber("deltaY", mcp.Description("Vertical scroll amount (negative=up, positive=down)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		bidiOrFallback("cdp_scroll", handleBiDiScroll),
 	)
@@ -191,6 +198,7 @@ func registerInteractionTools(s *server.MCPServer) {
 			)),
 			mcp.WithString("value", mcp.Required(), mcp.Description("Value to set in the field.")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			frameOpt(),
 		),
 		passThrough("fill_input"),
 	)
@@ -346,37 +354,45 @@ func passThrough(action string) server.ToolHandlerFunc {
 
 func handleBiDiClick(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	ctxID, err := resolveContext(args["tabId"])
+	frameSpec := toString(args["frame"])
+	ctxID, offX, offY, err := resolveFrameContext(ctx, args["tabId"], frameSpec)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	var x, y float64
+	// localX/localY are in the target context's own viewport (where BiDi input
+	// dispatches); reportX/reportY are translated back to the top viewport.
+	var localX, localY float64
 	sel := toString(args["selector"])
 	if sel != "" {
 		cx, cy, err := resolveSelectorCenter(ctx, ctxID, sel)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		x, y = cx, cy
+		localX, localY = cx, cy
 	} else if _, hasX := args["x"]; hasX {
-		x = toFloat(args["x"])
-		y = toFloat(args["y"])
+		// Caller's x,y are top-viewport coordinates; translate into the frame.
+		localX = toFloat(args["x"]) - offX
+		localY = toFloat(args["y"]) - offY
 	} else {
 		return mcp.NewToolResultError("cdp_click: provide either selector or x,y coordinates"), nil
 	}
-	if err := bidiClick(ctx, ctxID, x, y, "left"); err != nil {
+	if err := bidiClick(ctx, ctxID, localX, localY, "left"); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	out := map[string]any{"clicked": true, "x": x, "y": y}
+	out := map[string]any{"clicked": true, "x": localX + offX, "y": localY + offY}
 	if sel != "" {
 		out["selector"] = sel
+	}
+	if frameSpec != "" {
+		out["frame"] = frameSpec
 	}
 	return textResult(out)
 }
 
 func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	ctxID, err := resolveContext(args["tabId"])
+	frameSpec := toString(args["frame"])
+	ctxID, _, _, err := resolveFrameContext(ctx, args["tabId"], frameSpec)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -399,12 +415,16 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	if sel != "" {
 		out["selector"] = sel
 	}
+	if frameSpec != "" {
+		out["frame"] = frameSpec
+	}
 	return textResult(out)
 }
 
 func handleBiDiKey(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	ctxID, err := resolveContext(args["tabId"])
+	frameSpec := toString(args["frame"])
+	ctxID, _, _, err := resolveFrameContext(ctx, args["tabId"], frameSpec)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -412,41 +432,52 @@ func handleBiDiKey(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolR
 	if err := bidiKey(ctx, ctxID, key); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return textResult(map[string]any{"pressed": key})
+	out := map[string]any{"pressed": key}
+	if frameSpec != "" {
+		out["frame"] = frameSpec
+	}
+	return textResult(out)
 }
 
 func handleBiDiScroll(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
-	ctxID, err := resolveContext(args["tabId"])
+	frameSpec := toString(args["frame"])
+	ctxID, offX, offY, err := resolveFrameContext(ctx, args["tabId"], frameSpec)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	var x, y float64
+	var localX, localY float64
 	sel := toString(args["selector"])
 	if sel != "" {
 		cx, cy, err := resolveSelectorCenter(ctx, ctxID, sel)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		x, y = cx, cy
+		localX, localY = cx, cy
 	} else {
-		x = toFloat(args["x"])
-		y = toFloat(args["y"])
-		if x == 0 {
-			x = 600
+		tx := toFloat(args["x"])
+		ty := toFloat(args["y"])
+		if tx == 0 {
+			tx = 600
 		}
-		if y == 0 {
-			y = 400
+		if ty == 0 {
+			ty = 400
 		}
+		// Caller's x,y are top-viewport; translate into the frame's viewport.
+		localX = tx - offX
+		localY = ty - offY
 	}
 	deltaX := toFloat(args["deltaX"])
 	deltaY := toFloat(args["deltaY"])
-	if err := bidiScroll(ctx, ctxID, x, y, deltaX, deltaY); err != nil {
+	if err := bidiScroll(ctx, ctxID, localX, localY, deltaX, deltaY); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	out := map[string]any{"scrolled": true, "x": x, "y": y}
+	out := map[string]any{"scrolled": true, "x": localX + offX, "y": localY + offY}
 	if sel != "" {
 		out["selector"] = sel
+	}
+	if frameSpec != "" {
+		out["frame"] = frameSpec
 	}
 	return textResult(out)
 }
