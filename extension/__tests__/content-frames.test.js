@@ -19,6 +19,7 @@ beforeAll(() => {
     'sel', 'resolveRoot', 'deepElementFromPoint', 'listFrames', 'frameSeg',
     'queryElements', 'findText', 'extractText', 'inspectElement',
     'clickElement', 'getHTML', 'getInteractiveMap',
+    'resolveFrameElement', 'navigateFrame',
   ].join(', ');
   code = code.replace(/\}\)\(\);?\s*$/, `globalThis.__contentAPI = { ${fns} };\n})();`);
   new vm.Script(code, { filename: filePath }).runInThisContext();
@@ -214,6 +215,40 @@ describe('deepElementFromPoint (coordinate piercing)', () => {
     expect(hit.el).toBe(b);
     expect(hit.framePath).toBe('');
     expect(hit.offset).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe('navigateFrame', () => {
+  it('navigates a frame by setting its src, leaving the parent intact', () => {
+    addFrame(document, document.body, 'top_frame', { fx: 0, fy: 0 });
+    const out = api.navigateFrame({ frame: '#top_frame', url: 'https://x/y' });
+    expect(out.navigated).toBe(true);
+    expect(out.frame).toBe('#top_frame');
+    expect(document.getElementById('top_frame').getAttribute('src')).toBe('https://x/y');
+    // parent document still has the frame element (frameset preserved)
+    expect(document.querySelectorAll('#top_frame').length).toBe(1);
+  });
+
+  it('resolves a nested frame element through a same-origin parent', () => {
+    const { cdoc } = addFrame(document, document.body, 'top_frame');
+    addFrame(cdoc, cdoc.body, 'csframe');
+    const el = api.resolveFrameElement('#top_frame > #csframe');
+    expect(el.id).toBe('csframe');
+    expect(el.ownerDocument).toBe(cdoc);
+  });
+
+  it('requires a url', () => {
+    addFrame(document, document.body, 'top_frame');
+    expect(() => api.navigateFrame({ frame: '#top_frame' })).toThrow(/url is required/);
+  });
+
+  it('throws when the parent chain is cross-origin', () => {
+    const iframe = document.createElement('iframe');
+    iframe.id = 'xo';
+    document.body.appendChild(iframe);
+    rect(iframe);
+    Object.defineProperty(iframe, 'contentDocument', { get: () => null, configurable: true });
+    expect(() => api.navigateFrame({ frame: '#xo > #inner', url: 'https://x' })).toThrow(/cross-origin/);
   });
 });
 

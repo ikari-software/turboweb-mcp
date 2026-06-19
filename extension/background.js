@@ -975,6 +975,13 @@ async function dispatch(action, params) {
       return { tabId: tid, url: params.url };
     }
 
+    case 'navigate_frame':
+      // Frame-scoped navigation (extension/non-BiDi path): set the iframe
+      // element's src so only that frame reloads, preserving the parent frameset.
+      return await toContent(params.tabId, 'navigate_frame', {
+        frame: params.frame, url: params.url,
+      });
+
     case 'page_reload': {
       // Direct tabs.reload bypasses page CSP entirely — preferred over
       // dispatching a click on an in-page reload control with a
