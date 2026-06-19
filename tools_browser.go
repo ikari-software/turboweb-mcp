@@ -40,9 +40,18 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- navigate ---
 	addTool(s,
 		mcp.NewTool("navigate",
-			mcp.WithDescription("Navigate a tab to a URL. Omit tabId to use the active tab."),
+			mcp.WithDescription("Navigate a tab to a URL. Omit tabId to use the active tab. "+
+				"Pass `frame` to navigate ONLY that frame instead of the whole tab — this "+
+				"preserves the parent frameset, so frameset-dependent JS (geocoders, save "+
+				"handlers) keeps working. Navigating to a frame's content URL at the top level "+
+				"strips the shell and breaks that JS."),
 			mcp.WithString("url", mcp.Required(), mcp.Description("URL to navigate to")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			mcp.WithString("frame", mcp.Description(
+				"Optional. Navigate only this frame, leaving the parent frameset intact. "+
+					"A framePath (\">\"-separated CSS selectors, e.g. \"#top_frame\" or "+
+					"\"#top_frame > #csframe\"); discover frames with list_frames. With BiDi, any "+
+					"frame including cross-origin; without BiDi, the parent chain must be same-origin.")),
 		),
 		handleNavigate,
 	)
@@ -480,8 +489,36 @@ func handleListTabs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResu
 	return mcp.NewToolResultText(string(raw)), nil
 }
 
-func handleNavigate(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleNavigate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
+
+	// Frame-scoped navigation: navigate only the named frame so the parent
+	// frameset (and its geocoder/save JS) survives. Prefer BiDi — it navigates
+	// the child browsing context directly and reaches cross-origin frames.
+	// Otherwise fall back to the content script setting the iframe's src, which
+	// requires a same-origin parent chain.
+	if frameSpec := toString(args["frame"]); frameSpec != "" {
+		url := getString(args, "url", "")
+		if url == "" {
+			return mcp.NewToolResultError("navigate: url is required"), nil
+		}
+		if getBiDi() != nil {
+			ctxID, _, _, err := resolveFrameContext(ctx, args["tabId"], frameSpec)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			if err := bidiNavigate(ctx, ctxID, url); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return textResult(map[string]any{"navigated": true, "frame": frameSpec, "url": url, "via": "bidi"})
+		}
+		raw, err := send("navigate_frame", rawArgs(args))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(string(raw)), nil
+	}
+
 	raw, err := send("navigate", rawArgs(args))
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

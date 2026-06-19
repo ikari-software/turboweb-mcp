@@ -246,6 +246,36 @@
     return { count: frames.length, frames };
   }
 
+  // Resolve a framePath to the <iframe>/<frame> ELEMENT itself (not its content
+  // document). The parent chain must be same-origin so we can reach the element;
+  // the target frame's own content may be cross-origin (we only touch its src).
+  function resolveFrameElement(frameSpec) {
+    const segs = String(frameSpec || '').split('>').map(s => s.trim()).filter(Boolean);
+    if (!segs.length) throw new Error('frame is required');
+    const last = segs[segs.length - 1];
+    const parentPath = segs.slice(0, -1).join(' > ');
+    const parentDoc = parentPath ? frameCtx(parentPath).root : document;
+    let el;
+    try { el = parentDoc.querySelector(last); }
+    catch { throw new Error('Invalid frame selector: ' + JSON.stringify(last)); }
+    if (!el) throw new Error('Frame not found: ' + last);
+    if (el.tagName !== 'IFRAME' && el.tagName !== 'FRAME') {
+      throw new Error('Not a frame: ' + last + ' resolved to <' + el.tagName.toLowerCase() + '>');
+    }
+    return el;
+  }
+
+  // --- navigate_frame: navigate ONE frame without replacing the parent ---
+  // Setting the iframe element's src reloads just that frame inside its frameset,
+  // so frameset-dependent JS (geocoders, save handlers) keeps working — unlike a
+  // top-level navigation to the frame's content URL, which strips the shell.
+  function navigateFrame({ frame, url }) {
+    if (!url) throw new Error('url is required');
+    const el = resolveFrameElement(frame);
+    el.src = url;
+    return { navigated: true, frame, url, method: 'src' };
+  }
+
   // --- Extract visible text with positions (DOM-based OCR) ---
   // Now supports: selector scope, region filter {rx,ry,rw,rh}, and max results
   function extractText({ selector, region, max = 500, frame } = {}) {
@@ -2211,7 +2241,7 @@
           return { ring: '#58a6ff', fill: 'rgba(88, 166, 255, 0.55)',  glow: 'rgba(88, 166, 255, 0.55)' };
         case 'scroll': case 'cdp_scroll':
           return { ring: '#3fb950', fill: 'rgba(63, 185, 80, 0.45)',   glow: 'rgba(63, 185, 80, 0.5)'   };
-        case 'navigate': case 'page_reload':
+        case 'navigate': case 'page_reload': case 'navigate_frame':
           return { ring: '#a371f7', fill: 'rgba(163, 113, 247, 0.5)',  glow: 'rgba(163, 113, 247, 0.55)' };
         case '__error':
           return { ring: '#f85149', fill: 'rgba(248, 81, 73, 0.55)',   glow: 'rgba(248, 81, 73, 0.6)'   };
@@ -3116,6 +3146,7 @@
       get_interactive_map: (p) => getInteractiveMap(p),
       query_elements: (p) => queryElements(p),
       list_frames: () => listFrames(),
+      navigate_frame: (p) => navigateFrame(p),
       inspect_form: (p) => inspectForm(p),
       page_capabilities: () => pageCapabilities(),
       click: (p) => clickElement(p),
