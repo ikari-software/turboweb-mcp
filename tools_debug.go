@@ -250,6 +250,17 @@ func bidiOrFallback(action string, bidiHandler server.ToolHandlerFunc) server.To
 		if getBiDi() != nil {
 			return bidiHandler(ctx, req)
 		}
+		// Cross-origin frame targeting only works on the BiDi path (child
+		// browsing contexts). The extension fallback (chrome.debugger on the
+		// top target) would silently ignore `frame` and act on the top frame,
+		// so refuse rather than click/type in the wrong place.
+		if frame := toString(req.GetArguments()["frame"]); frame != "" {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"%s with frame=%q requires WebDriver BiDi (not connected). The extension "+
+					"fallback cannot target a child frame's browsing context. Launch with BiDi, "+
+					"or for SAME-ORIGIN frames use click/type_text/scroll with the frame param.",
+				action, frame)), nil
+		}
 		return extensionHandler(ctx, req)
 	}
 }

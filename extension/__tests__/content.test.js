@@ -55,6 +55,7 @@ beforeAll(() => {
     'executeJS', 'injectScript', 'prepareForUserClick', 'overlay',
     'dragDropFile', 'runDropInPage', '__turboPerformDrop',
     'domMutationsMark', 'domMutationsSince', 'screenshotDiffMeta',
+    'resolveRoot', 'deepElementFromPoint', 'listFrames', 'frameSeg',
   ].join(', ');
 
   // Inject an export line right before the closing })(); so functions are accessible

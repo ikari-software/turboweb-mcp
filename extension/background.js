@@ -1039,25 +1039,28 @@ async function dispatch(action, params) {
     // --- Content-script commands ---
     case 'extract_text':
       return await toContent(params.tabId, 'extract_text', {
-        selector: params.selector, region: params.region, max: params.max,
+        selector: params.selector, region: params.region, max: params.max, frame: params.frame,
       });
 
     case 'find_text':
       return await toContent(params.tabId, 'find_text', {
-        query: params.query, max: params.max, caseSensitive: params.caseSensitive,
+        query: params.query, max: params.max, caseSensitive: params.caseSensitive, frame: params.frame,
       });
 
     case 'inspect':
       return await toContent(params.tabId, 'inspect', {
         selector: params.selector, x: params.x, y: params.y,
-        text: params.text, depth: params.depth,
+        text: params.text, depth: params.depth, frame: params.frame,
       });
 
     case 'get_interactive_map':
-      return await toContent(params.tabId, 'get_interactive_map');
+      return await toContent(params.tabId, 'get_interactive_map', { frame: params.frame });
+
+    case 'list_frames':
+      return await toContent(params.tabId, 'list_frames');
 
     case 'query_elements':
-      return await toContent(params.tabId, 'query_elements', { selector: params.selector, limit: params.limit });
+      return await toContent(params.tabId, 'query_elements', { selector: params.selector, limit: params.limit, frame: params.frame });
 
     case 'page_capabilities': {
       const tid = await resolveTab(params.tabId);
@@ -1104,29 +1107,34 @@ async function dispatch(action, params) {
     }
 
     case 'click':
-      return await toContent(params.tabId, 'click', { selector: params.selector, x: params.x, y: params.y });
+      return await toContent(params.tabId, 'click', { selector: params.selector, x: params.x, y: params.y, frame: params.frame });
 
     case 'type_text':
       return await toContent(params.tabId, 'type_text', {
         selector: params.selector, text: params.text,
-        clear: params.clear, pressEnter: params.pressEnter,
+        clear: params.clear, pressEnter: params.pressEnter, frame: params.frame,
       });
 
     case 'scroll':
       return await toContent(params.tabId, 'scroll', {
         x: params.x, y: params.y, selector: params.selector,
-        direction: params.direction, amount: params.amount,
+        direction: params.direction, amount: params.amount, frame: params.frame,
       });
 
     case 'get_html':
       return await toContent(params.tabId, 'get_html', {
         selector: params.selector, outer: params.outer,
-        maxDepth: params.maxDepth, maxLength: params.maxLength,
+        maxDepth: params.maxDepth, maxLength: params.maxLength, frame: params.frame,
       });
 
     case 'get_page_structure':
       return await toContent(params.tabId, 'get_page_structure', {
-        selector: params.selector, maxDepth: params.maxDepth, visibleOnly: params.visibleOnly,
+        selector: params.selector, maxDepth: params.maxDepth, visibleOnly: params.visibleOnly, frame: params.frame,
+      });
+
+    case 'fill_input':
+      return await toContent(params.tabId, 'fill_input', {
+        selector: params.selector, value: params.value, frame: params.frame,
       });
 
     case 'inject_script':
