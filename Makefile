@@ -1,5 +1,7 @@
 BINARY = turboweb-mcp-by-ikari
-VERSION = 1.9.0
+# Single source of truth for the version: the repo-root VERSION file.
+# main.go gets it via ldflags; extension/build.js reads the same file.
+VERSION := $(shell cat VERSION)
 GITHUB_REPO = ikari-software/turboweb-mcp
 
 # Install prefix — defaults to the Homebrew prefix when `brew` is on PATH

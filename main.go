@@ -16,9 +16,10 @@ var logger = log.New(os.Stderr, "[turboweb] ", 0)
 // serverVersion is advertised to MCP clients and to /version on the
 // daemon. Bumping it on a release lets running MCP instances detect a
 // stale daemon and respawn it instead of routing through the old build.
-// Injected at build time via -ldflags "-X main.serverVersion=VERSION";
-// the fallback keeps `go run .` and IDE debuggers working without make.
-var serverVersion = "1.9.0"
+// The single source of truth is the repo-root VERSION file, injected at
+// build time via -ldflags "-X main.serverVersion=$(VERSION)". The "dev"
+// fallback keeps `go run .`, tests, and IDE debuggers working without make.
+var serverVersion = "dev"
 
 func main() {
 	// --ws-server: run as a standalone WebSocket daemon (no MCP stdio).

@@ -10,6 +10,10 @@ const path = require('path');
 
 const SRC = __dirname;
 const DIST = path.join(SRC, 'dist');
+// Single source of truth for the version: the repo-root VERSION file. The
+// version in manifest.json is a placeholder — it is overwritten here so the
+// extension version never has to be bumped separately from the binary.
+const VERSION = fs.readFileSync(path.join(SRC, '..', 'VERSION'), 'utf8').trim();
 const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js'];
 // Directory trees copied verbatim into each dist target. The browser
 // consumes `icons/` via manifest.icons + manifest.action.default_icon.
@@ -47,6 +51,7 @@ function build() {
 
     // Build target-specific manifest
     const m = JSON.parse(JSON.stringify(manifest));
+    m.version = VERSION; // stamp from the repo-root VERSION file (single source)
 
     if (target === 'firefox') {
       // Firefox MV3: uses scripts array, not service_worker
