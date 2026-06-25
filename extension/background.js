@@ -392,22 +392,109 @@ async function resolveTab(tabId) {
 // --- Ensure content script is injected ---
 async function ensureContentScript(tabId) {
   try {
-    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    // Probe the top frame specifically — with all_frames:true an unframed ping
+    // would broadcast and the first of many responders would answer.
+    await chrome.tabs.sendMessage(tabId, { action: 'ping' }, { frameId: 0 });
   } catch {
+    // Re-inject into every frame so child frames (cross-origin embeds) also
+    // get content.js if the manifest injection was missed.
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ['content.js'],
     });
     await new Promise(r => setTimeout(r, CONTENT_SCRIPT_INIT_DELAY_MS));
   }
 }
 
+// --- Cross-origin frame routing ----------------------------------------------
+// content.js runs in EVERY frame (manifest all_frames:true), each in its own
+// isolated world — so it can read a cross-origin frame the top frame can't.
+// The agent still addresses frames by a ">"-separated selector chain; we map
+// that chain to a Chrome frameId one hop at a time and route the DOM op to the
+// frame that owns the document. See resolveFrameId.
+//
+// Only these actions are "frame-local" — they operate on a single document and
+// are safe to route into a child frame. navigate_frame (parent-relative) and
+// list_frames (enumerates the whole tree from the top) deliberately are NOT.
+const FRAME_LOCAL_ACTIONS = new Set([
+  'extract_text', 'find_text', 'inspect', 'get_interactive_map', 'query_elements',
+  'click', 'type_text', 'fill_input', 'scroll', 'get_html', 'get_page_structure',
+]);
+
+const FRAME_PROBE_TIMEOUT_MS = 2000;
+// nonce → resolve(childFrameId). A child frame that receives our postMessage
+// probe acks via chrome.runtime.sendMessage; we read the trusted sender.frameId.
+const pendingFrameProbes = new Map();
+
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg && msg.action === '__frame_probe_ack' && msg.nonce && pendingFrameProbes.has(msg.nonce)) {
+    const resolve = pendingFrameProbes.get(msg.nonce);
+    pendingFrameProbes.delete(msg.nonce);
+    resolve(sender.frameId);
+  }
+  // No response needed; other listeners (the action dispatch) handle their own.
+});
+
+// locateChildFrame asks the parent frame to find the <iframe> matching one
+// selector segment and postMessage a nonce into it; the child acks with its
+// frameId. Returns the child's frameId + the child viewport's origin within the
+// parent (for top-viewport coordinate translation).
+async function locateChildFrame(tid, parentFrameId, selector) {
+  const nonce = crypto.randomUUID();
+  const acked = new Promise((resolve, reject) => {
+    pendingFrameProbes.set(nonce, resolve);
+    setTimeout(() => {
+      if (pendingFrameProbes.delete(nonce)) {
+        reject(new Error(`frame "${selector}" did not answer the probe — it may still be loading, be sandboxed without scripts, or not be a frame`));
+      }
+    }, FRAME_PROBE_TIMEOUT_MS);
+  });
+  const located = new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tid, { action: '__locate_child_frame', params: { selector, nonce } }, { frameId: parentFrameId }, (response) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else if (response?.error) reject(new Error(response.error));
+      else resolve(response);
+    });
+  });
+  const [loc, childFrameId] = await Promise.all([located, acked]);
+  return { childFrameId, origin: loc.origin || { x: 0, y: 0 } };
+}
+
+// resolveFrameId walks a framePath (e.g. "#outer > #inner") to a Chrome
+// frameId, accumulating the cumulative top-viewport offset of the target
+// frame's viewport. Works across origins because each hop is resolved by the
+// frame that owns the <iframe> element.
+async function resolveFrameId(tid, framePath) {
+  const segments = String(framePath).split('>').map(s => s.trim()).filter(Boolean);
+  let frameId = 0;
+  const offset = { x: 0, y: 0 };
+  for (const selector of segments) {
+    const { childFrameId, origin } = await locateChildFrame(tid, frameId, selector);
+    offset.x += origin.x;
+    offset.y += origin.y;
+    frameId = childFrameId;
+  }
+  return { frameId, offset };
+}
+
 // --- Send command to content script ---
-async function toContent(tabId, action, params = {}) {
+// frameId targets a specific frame (default 0 = top). When a frame-local action
+// carries a `frame` selector-path, we resolve it to the owning frame and route
+// there, stripping `frame` and injecting the cumulative offset so the frame's
+// reported coordinates stay top-viewport-relative.
+async function toContent(tabId, action, params = {}, frameId) {
   const tid = await resolveTab(tabId);
   await ensureContentScript(tid);
+  let targetFrame = frameId == null ? 0 : frameId;
+  let sendParams = params;
+  if (frameId == null && params.frame && FRAME_LOCAL_ACTIONS.has(action)) {
+    const { frameId: fid, offset } = await resolveFrameId(tid, params.frame);
+    targetFrame = fid;
+    const { frame, ...rest } = params;
+    sendParams = { ...rest, __frameOffset: offset, __framePath: params.frame };
+  }
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tid, { action, params }, (response) => {
+    chrome.tabs.sendMessage(tid, { action, params: sendParams }, { frameId: targetFrame }, (response) => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
       } else if (response?.error) {
@@ -462,7 +549,9 @@ async function notifyOverlay(tabId, payload) {
     const tid = await resolveTab(tabId);
     await ensureContentScript(tid);
     return await new Promise((resolve) => {
-      chrome.tabs.sendMessage(tid, { action: '__turbo_overlay', payload }, () => {
+      // The overlay UI lives only in the top frame; target it explicitly so the
+      // child-frame content scripts (all_frames:true) don't also receive it.
+      chrome.tabs.sendMessage(tid, { action: '__turbo_overlay', payload }, { frameId: 0 }, () => {
         void chrome.runtime.lastError;
         resolve();
       });
@@ -486,7 +575,70 @@ const PAGE_ACTIONS_THAT_GATE_ON_CURSOR = new Set([
 ]);
 
 // --- Legacy CDP real-input fallback helpers (used by tests and extension fallback mode) ---
+// CDP Input.dispatch* modifier bitmask (see Input.dispatchKeyEvent docs).
+const CDP_MOD_ALT = 1;
+const CDP_MOD_CTRL = 2;
+const CDP_MOD_META = 4;
 const CDP_MOD_SHIFT = 8;
+const CDP_MODIFIERS = { Alt: CDP_MOD_ALT, Control: CDP_MOD_CTRL, Ctrl: CDP_MOD_CTRL, Meta: CDP_MOD_META, Shift: CDP_MOD_SHIFT };
+
+// True on macOS — select-all is Cmd+A there, Ctrl+A elsewhere. navigator is
+// available in the MV3 service worker / background page.
+function isMacPlatform() {
+  const p = (typeof navigator !== 'undefined' && (navigator.userAgentData?.platform || navigator.platform)) || '';
+  return /mac/i.test(p);
+}
+
+// Key descriptors carry the windowsVirtualKeyCode CDP needs to perform a key's
+// native default action (Backspace deletes, Enter submits, etc.). A bare
+// rawKeyDown with no VK code dispatches the event but performs no editing —
+// which is why Backspace "didn't work" before. text is set for printable keys.
+const KEY_DESCRIPTORS = {
+  Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
+  Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
+  Enter: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
+  Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
+  ' ': { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
+  PageUp: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
+  End: { key: 'End', code: 'End', keyCode: 35 },
+  Home: { key: 'Home', code: 'Home', keyCode: 36 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+  Delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
+};
+
+// keyDescriptor resolves a key name to a CDP descriptor. Single printable
+// characters (including letters used in chords like Meta+a) are derived on the
+// fly: A-Z/a-z get KeyX codes + the correct VK code so shortcuts fire.
+function keyDescriptor(key) {
+  if (KEY_DESCRIPTORS[key]) return KEY_DESCRIPTORS[key];
+  if (typeof key === 'string' && [...key].length === 1) {
+    const ch = key;
+    const lower = ch.toLowerCase();
+    let code, keyCode;
+    if (lower >= 'a' && lower <= 'z') {
+      code = 'Key' + lower.toUpperCase();
+      keyCode = 65 + (lower.charCodeAt(0) - 97);
+    } else if (ch >= '0' && ch <= '9') {
+      code = 'Digit' + ch;
+      keyCode = 48 + (ch.charCodeAt(0) - 48);
+    }
+    return { key: ch, code, keyCode, text: ch };
+  }
+  // Unknown key name — pass through as the key, no VK code (best effort).
+  return { key, code: key };
+}
+
+// modifiersBitmask turns ["Meta","Shift"] into the CDP modifier integer.
+function modifiersBitmask(mods) {
+  let m = 0;
+  for (const name of mods || []) m |= (CDP_MODIFIERS[name] || 0);
+  return m;
+}
+
 const attachedTabs = new Set();
 
 async function ensureDebugger(tabId) {
@@ -549,7 +701,7 @@ async function cdpResolveSelectorCenter(tid, selector) {
   return { cx: v.cx, cy: v.cy };
 }
 
-async function cdpClick(tabId, x, y, shift = false, selector = null) {
+async function cdpClick(tabId, x, y, shift = false, selector = null, clickCount = 1) {
   const tid = await ensureDebugger(tabId);
   let cx = x, cy = y;
   if (selector) {
@@ -558,15 +710,73 @@ async function cdpClick(tabId, x, y, shift = false, selector = null) {
     throw new Error('cdp_click: provide either selector or x,y coordinates');
   }
   const modifiers = shift ? CDP_MOD_SHIFT : 0;
-  await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: 1, modifiers });
-  await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: 1, modifiers });
-  const out = { clicked: true, x: cx, y: cy, shift: !!shift };
+  const count = Math.max(1, Math.min(3, clickCount | 0));
+  // CDP detects double/triple-click from the clickCount on consecutive
+  // press/release pairs at the same point: 1 then 2 (=word select) then 3
+  // (=select the whole line / input contents). We escalate the count across
+  // pairs so a single call can produce a real, trusted multi-click.
+  for (let n = 1; n <= count; n++) {
+    await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: n, modifiers });
+    await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: n, modifiers });
+  }
+  const out = { clicked: true, x: cx, y: cy, shift: !!shift, clickCount: count };
   if (selector) out.selector = selector;
   return out;
 }
 
-async function cdpType(tabId, text = '', selector = null) {
+// cdpDispatchKey sends one trusted key press with optional held modifiers.
+// Modifier keys are pressed down first (so the page observes e.g. Meta held),
+// the key down+up carry the modifier bitmask (which is what triggers native
+// shortcuts like select-all), then modifiers release in reverse order.
+async function cdpDispatchKey(tid, key, mods = []) {
+  const d = keyDescriptor(key);
+  const mask = modifiersBitmask(mods);
+  for (const name of mods) {
+    const md = keyDescriptor(name);
+    await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key: md.key, code: md.code, windowsVirtualKeyCode: md.keyCode, nativeVirtualKeyCode: md.keyCode });
+  }
+  const down = { type: d.text ? 'keyDown' : 'rawKeyDown', key: d.key, code: d.code, modifiers: mask };
+  if (d.keyCode != null) { down.windowsVirtualKeyCode = d.keyCode; down.nativeVirtualKeyCode = d.keyCode; }
+  // Suppress text insertion when a non-shift modifier is held — Meta+a is a
+  // select-all command, not a request to type the letter "a".
+  if (d.text && (mask & ~CDP_MOD_SHIFT) === 0) down.text = d.text;
+  await cdpSend(tid, 'Input.dispatchKeyEvent', down);
+  await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyUp', key: d.key, code: d.code, modifiers: mask, ...(d.keyCode != null ? { windowsVirtualKeyCode: d.keyCode, nativeVirtualKeyCode: d.keyCode } : {}) });
+  for (const name of [...mods].reverse()) {
+    const md = keyDescriptor(name);
+    await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyUp', key: md.key, code: md.code, windowsVirtualKeyCode: md.keyCode, nativeVirtualKeyCode: md.keyCode });
+  }
+}
+
+// cdpSelectAllDelete clears the focused field with trusted input: select-all
+// (Cmd+A on mac, Ctrl+A elsewhere) then Backspace. This is the Chrome-side
+// equivalent of bidiSelectAllClear and is what makes cdp_type clear=true work.
+async function cdpSelectAllDelete(tid) {
+  await cdpDispatchKey(tid, 'a', [isMacPlatform() ? 'Meta' : 'Control']);
+  await cdpDispatchKey(tid, 'Backspace');
+}
+
+function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// DEFAULT_TYPE_WPM mirrors the Go side: humanized cadence is on by default.
+const DEFAULT_TYPE_WPM = 110;
+
+// humanGapMs is the inter-key delay for a human typing at `wpm`: base cadence
+// (60000/(wpm*5) ms/char) with jitter, and longer pauses after spaces and
+// punctuation. Clamped to a sane range.
+function humanGapMs(ch, wpm) {
+  const base = 60000 / (wpm * 5);
+  let gap = base * (0.6 + Math.random()); // 0.6×–1.6×
+  if (ch === ' ' || ch === '\t' || ch === '\n') gap *= 1.8;
+  else if ('.,!?;:'.includes(ch)) gap *= 2.2;
+  return Math.min(1500, Math.max(20, gap));
+}
+
+async function cdpType(tabId, text = '', selector = null, clear = false, wpm) {
   const tid = await ensureDebugger(tabId);
+  // Humanized cadence is ON by default; wpm=0 means instant machine-speed.
+  if (wpm === undefined || wpm === null) wpm = DEFAULT_TYPE_WPM;
+  const humanize = wpm > 0;
   if (selector) {
     // Focus the element first so subsequent key events route to it. We
     // verify activeElement actually moved — some elements refuse focus
@@ -586,30 +796,26 @@ async function cdpType(tabId, text = '', selector = null) {
       throw new Error(`focus on ${JSON.stringify(selector)} did not take effect (element refused focus?)`);
     }
   }
-  for (const ch of String(text)) {
+  if (clear) await cdpSelectAllDelete(tid);
+  const chars = [...String(text)];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
     await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch });
+    if (humanize) await sleepMs(20 + Math.random() * 40); // key dwell
     await cdpSend(tid, 'Input.dispatchKeyEvent', { type: 'keyUp', text: ch });
+    if (humanize && i < chars.length - 1) await sleepMs(humanGapMs(ch, wpm));
   }
-  const out = { typed: text.length };
+  const out = { typed: chars.length, cleared: !!clear, wpm: humanize ? wpm : 0 };
   if (selector) out.selector = selector;
   return out;
 }
 
-async function cdpKey(tabId, key) {
-  const keyMap = {
-    Enter: 'Enter',
-    Escape: 'Escape',
-    Tab: 'Tab',
-    Backspace: 'Backspace',
-    ArrowDown: 'ArrowDown',
-    ArrowUp: 'ArrowUp',
-    ArrowLeft: 'ArrowLeft',
-    ArrowRight: 'ArrowRight',
-  };
-  const k = keyMap[key] || key;
-  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key: k });
-  await cdpSend(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: k });
-  return { pressed: k };
+async function cdpKey(tabId, key, modifiers = []) {
+  const tid = await ensureDebugger(tabId);
+  await cdpDispatchKey(tid, key, Array.isArray(modifiers) ? modifiers : []);
+  const out = { pressed: key };
+  if (modifiers && modifiers.length) out.modifiers = modifiers;
+  return out;
 }
 
 async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600, selector = null) {
@@ -1015,11 +1221,11 @@ async function dispatch(action, params) {
 
     // --- CDP real-input commands (extension fallback path) ---
     case 'cdp_click':
-      return await cdpClick(params.tabId, params.x, params.y, params.shift, params.selector);
+      return await cdpClick(params.tabId, params.x, params.y, params.shift, params.selector, params.clickCount);
     case 'cdp_type':
-      return await cdpType(params.tabId, params.text, params.selector);
+      return await cdpType(params.tabId, params.text, params.selector, params.clear, params.wpm);
     case 'cdp_key':
-      return await cdpKey(params.tabId, params.key);
+      return await cdpKey(params.tabId, params.key, params.modifiers);
     case 'cdp_scroll':
       return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY, params.selector);
 

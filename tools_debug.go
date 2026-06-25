@@ -613,6 +613,32 @@ func toBool(v any) bool {
 	return false
 }
 
+// toStringSlice coerces a JSON array (or a single string) into []string,
+// dropping empty entries. MCP array args arrive as []any.
+func toStringSlice(v any) []string {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s := toString(e); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	default:
+		return nil
+	}
+}
+
 func intOr(v any, def int) int {
 	if v == nil {
 		return def

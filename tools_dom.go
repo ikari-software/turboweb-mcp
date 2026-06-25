@@ -21,10 +21,11 @@ func frameOpt() mcp.ToolOption {
 		"Optional. Scope this call to an iframe. A framePath: a \">\"-separated list of CSS "+
 			"selectors, each resolving an <iframe>/<frame> within the previous frame's document "+
 			"(e.g. \"#top_frame\" or \"#top_frame > #csframe\"). Discover frames with list_frames. "+
-			"Same-origin frames work on every DOM tool. Cross-origin frames work only on the "+
-			"cdp_* tools, which dispatch real input into the frame's own browsing context via "+
-			"BiDi; other tools return a clear error for cross-origin. Coordinates stay "+
-			"top-viewport-relative either way.",
+			"Works for BOTH same-origin AND cross-origin frames — the content script runs in every "+
+			"frame, so DOM reads and synthetic interaction (extract_text, find_text, query_elements, "+
+			"click, type_text, fill_input, scroll, etc.) reach cross-origin embeds too. Frames are "+
+			"addressed by SELECTOR, not coordinates: a framePath must be a chain of CSS selectors. "+
+			"Coordinates stay top-viewport-relative in the result either way.",
 	))
 }
 
@@ -35,8 +36,9 @@ func registerDomTools(s *server.MCPServer) {
 			mcp.WithDescription("Enumerate the frame tree of the page. Returns every <iframe>/<frame> "+
 				"with {frameId, framePath, id, name, src, url, origin, isSameOrigin, rect}. framePath "+
 				"(e.g. \"#top_frame > #csframe\") is what you pass as the `frame` argument to other DOM "+
-				"tools to scope them to that frame. Same-origin frames are reachable by all tools; "+
-				"cross-origin frames (isSameOrigin:false) are only reachable via cdp_* (real input)."),
+				"tools to scope them to that frame. Both same-origin and cross-origin frames are "+
+				"reachable by DOM/synthetic tools (the content script runs in every frame); pass the "+
+				"framePath as the `frame` argument. The cdp_* tools also accept `frame` for trusted input."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
 		handleListFrames,

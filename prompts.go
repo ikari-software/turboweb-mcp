@@ -76,6 +76,32 @@ toast. Bypassing them with execute_js leaves the user blind.
   pre-compute viewport math.
 - Use coords only when targeting a canvas, an OS-level chrome region, or
   any element where a selector legitimately doesn't apply.
+- Prefer selectors — they survive scroll/reflow. For iframes they're also
+  the only portable target: a frame argument is a chain of CSS selectors
+  (e.g. "#outer > #inner"), and coordinates don't translate across a
+  cross-origin frame boundary.
+
+# Frames (same- and cross-origin)
+
+- The content script runs in EVERY frame, so DOM reads and synthetic
+  interaction (extract_text, find_text, query_elements, click, type_text,
+  fill_input, scroll) reach cross-origin embeds — pass the frame argument
+  with the framePath. Discover frames and their framePaths with list_frames.
+- Address frames by selector, never by coordinates. cdp_* tools also accept
+  a frame argument for trusted input into a frame.
+
+# Replacing a field's value
+
+- To REPLACE (not append) text in an input/textarea, use cdp_type with
+  clear=true — it selects-all + deletes before typing, with trusted input,
+  so React/Vue/MUI controlled fields update correctly. (fill_input also
+  replaces, via the framework value-setter, for plain form fields.)
+- Need the selection or deletion as discrete steps? cdp_click clickCount=3
+  triple-clicks to select all of a field's text; cdp_key with
+  modifiers=["Meta"] (macOS) / ["Control"] (else) sends select-all; cdp_key
+  key="Backspace" deletes. These are the trusted-input building blocks.
+- Do NOT reach for execute_js to set .value — it skips the overlay and often
+  doesn't notify the framework.
 
 # File uploads
 

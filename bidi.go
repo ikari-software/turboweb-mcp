@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -283,6 +284,77 @@ func DiscoverBiDiEndpoint(port int) (string, error) {
 	return fmt.Sprintf("ws://127.0.0.1:%d/session", port), nil
 }
 
+// activateBiDi installs a freshly-connected client as the global BiDi client,
+// subscribes to the standard events, and watches for disconnect.
+func activateBiDi(client *BiDiClient) {
+	setBiDi(client)
+
+	ctx := context.Background()
+	client.Subscribe(ctx, []string{
+		"log.entryAdded",
+		"browsingContext.contextCreated",
+		"browsingContext.contextDestroyed",
+	})
+
+	go func() {
+		<-client.closed
+		logger.Printf("BiDi connection lost")
+		setBiDi(nil)
+	}()
+}
+
+// tryConnectBiDi makes a single discover+connect attempt on the given port,
+// activating the client on success and returning the ws URL it connected to.
+func tryConnectBiDi(port int) (string, error) {
+	wsURL, err := DiscoverBiDiEndpoint(port)
+	if err != nil {
+		return "", err
+	}
+	client, err := ConnectBiDi(wsURL)
+	if err != nil {
+		return "", err
+	}
+	// Firefox/Zen BiDi-only: connecting to the /session WebSocket gives a live
+	// socket but NO WebDriver session — context commands then fail with "invalid
+	// session id". Chrome's CDP-derived endpoint already carries a session, so
+	// this handshake only applies to the Firefox fallback URL.
+	if strings.HasSuffix(wsURL, "/session") {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := ensureBiDiSession(sctx, client); err != nil {
+			client.Close()
+			return "", err
+		}
+	}
+	activateBiDi(client)
+	return wsURL, nil
+}
+
+// ensureBiDiSession makes a Firefox/Zen BiDi connection usable. Firefox allows
+// only ONE active WebDriver session and a session orphaned by a since-closed
+// connection lingers — so blindly calling session.new fails with "Maximum
+// number of active sessions". Instead: probe with getTree (reuse a live
+// session), create one only when absent, and if creation is blocked by a stale
+// session, end it and retry once.
+func ensureBiDiSession(ctx context.Context, client *BiDiClient) error {
+	if _, err := client.Send(ctx, "browsingContext.getTree", map[string]any{}); err == nil {
+		return nil // a usable session already exists — reuse it
+	}
+	_, err := client.Send(ctx, "session.new", map[string]any{"capabilities": map[string]any{}})
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "Maximum number of active sessions") {
+		// A stale session blocks creation; clear it and retry once.
+		_, _ = client.Send(ctx, "session.end", map[string]any{})
+		if _, e2 := client.Send(ctx, "session.new", map[string]any{"capabilities": map[string]any{}}); e2 != nil {
+			return fmt.Errorf("a stale BiDi session is blocking connection and could not be reset (%w) — restart the browser to clear it", e2)
+		}
+		return nil
+	}
+	return fmt.Errorf("session.new failed: %w", err)
+}
+
 // connectBiDiWithRetry discovers the endpoint and connects, retrying on failure.
 func connectBiDiWithRetry(port int) {
 	backoff := 500 * time.Millisecond
@@ -291,14 +363,7 @@ func connectBiDiWithRetry(port int) {
 	for i := 0; i < 20; i++ {
 		time.Sleep(backoff)
 
-		wsURL, err := DiscoverBiDiEndpoint(port)
-		if err != nil {
-			logger.Printf("BiDi discovery failed: %v (retry %d)", err, i+1)
-			backoff = min(backoff*2, maxBackoff)
-			continue
-		}
-
-		client, err := ConnectBiDi(wsURL)
+		wsURL, err := tryConnectBiDi(port)
 		if err != nil {
 			logger.Printf("BiDi connect failed: %v (retry %d)", err, i+1)
 			backoff = min(backoff*2, maxBackoff)
@@ -306,23 +371,6 @@ func connectBiDiWithRetry(port int) {
 		}
 
 		logger.Printf("BiDi connected to %s", wsURL)
-		setBiDi(client)
-
-		// Subscribe to useful events
-		ctx := context.Background()
-		client.Subscribe(ctx, []string{
-			"log.entryAdded",
-			"browsingContext.contextCreated",
-			"browsingContext.contextDestroyed",
-		})
-
-		// Monitor for disconnection
-		go func() {
-			<-client.closed
-			logger.Printf("BiDi connection lost")
-			setBiDi(nil)
-		}()
-
 		return
 	}
 	logger.Printf("BiDi: gave up after 20 retries on port %d", port)

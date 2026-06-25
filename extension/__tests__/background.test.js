@@ -48,8 +48,8 @@ beforeAll(() => {
     'getStats', 'broadcast', 'logActivity', 'updateBadge',
     'connect', 'scheduleReconnect', 'startKeepalive', 'stopKeepalive',
     'pingWS', 'handlePong', 'forceReconnect',
-    'resolveTab', 'ensureContentScript', 'toContent',
-    'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll',
+    'resolveTab', 'ensureContentScript', 'toContent', 'resolveFrameId',
+    'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll', 'humanGapMs', 'DEFAULT_TYPE_WPM',
     'setInputFiles', 'interceptFileChooser',
     'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
     'executeJsMain', 'adaptScript', 'dispatch',
@@ -134,7 +134,7 @@ describe('resolveTab', () => {
 // ============================================================
 describe('ensureContentScript', () => {
   it('skips injection when ping succeeds', async () => {
-    chrome.tabs.sendMessage.mockImplementation((_id, _msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((_id, _msg, _opts, cb) => {
       if (cb) cb({ ok: true });
     });
     await api.ensureContentScript(1);
@@ -146,7 +146,7 @@ describe('ensureContentScript', () => {
     chrome.scripting.executeScript.mockResolvedValue([]);
     await api.ensureContentScript(1);
     expect(chrome.scripting.executeScript).toHaveBeenCalledWith({
-      target: { tabId: 1 },
+      target: { tabId: 1, allFrames: true },
       files: ['content.js'],
     });
   });
@@ -158,7 +158,7 @@ describe('ensureContentScript', () => {
 describe('toContent', () => {
   it('resolves tab, ensures script, sends message', async () => {
     // Ping succeeds (ensureContentScript)
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ blocks: [] });
     });
@@ -168,7 +168,7 @@ describe('toContent', () => {
   });
 
   it('rejects when chrome.runtime.lastError is set', async () => {
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       chrome.runtime._lastError = { message: 'tab closed' };
       if (cb) cb(undefined);
@@ -179,12 +179,111 @@ describe('toContent', () => {
   });
 
   it('rejects when response has error', async () => {
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ error: 'not found' });
     });
 
     await expect(api.toContent(5, 'click', { selector: '#x' })).rejects.toThrow('not found');
+  });
+});
+
+// ============================================================
+// Cross-origin frame routing (all_frames + frameId handshake)
+// ============================================================
+describe('cross-origin frame routing', () => {
+  it('resolveFrameId returns the top frame for an empty path', async () => {
+    const r = await api.resolveFrameId(1, '');
+    expect(r).toEqual({ frameId: 0, offset: { x: 0, y: 0 } });
+  });
+
+  it('resolveFrameId walks one hop: locate-probe + frameId ack, captures the child origin', async () => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (msg.action === '__locate_child_frame') {
+        // Parent found the iframe and posted the nonce; simulate the child
+        // acking from its (trusted) frameId 7.
+        chrome.runtime.onMessage._fire({ action: '__frame_probe_ack', nonce: msg.params.nonce }, { frameId: 7 });
+        if (cb) cb({ ok: true, origin: { x: 100, y: 50 } });
+        return;
+      }
+      if (cb) cb({});
+    });
+    const r = await api.resolveFrameId(1, '#child');
+    expect(r).toEqual({ frameId: 7, offset: { x: 100, y: 50 } });
+  });
+
+  it('resolveFrameId accumulates offset across two hops', async () => {
+    const fid = { '#a': 3, '#b': 9 };
+    const origin = { '#a': { x: 10, y: 20 }, '#b': { x: 5, y: 5 } };
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (msg.action === '__locate_child_frame') {
+        const s = msg.params.selector;
+        chrome.runtime.onMessage._fire({ action: '__frame_probe_ack', nonce: msg.params.nonce }, { frameId: fid[s] });
+        if (cb) cb({ ok: true, origin: origin[s] });
+        return;
+      }
+      if (cb) cb({});
+    });
+    const r = await api.resolveFrameId(1, '#a > #b');
+    expect(r).toEqual({ frameId: 9, offset: { x: 15, y: 25 } });
+  });
+
+  it('resolveFrameId rejects when a hop never acks (timeout)', async () => {
+    vi.useFakeTimers();
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (msg.action === '__locate_child_frame') { if (cb) cb({ ok: true, origin: { x: 0, y: 0 } }); return; } // no ack fired
+      if (cb) cb({});
+    });
+    const p = api.resolveFrameId(1, '#ghost');
+    const expectation = expect(p).rejects.toThrow(/did not answer the probe/);
+    await vi.advanceTimersByTimeAsync(2100);
+    await expectation;
+    vi.useRealTimers();
+  });
+
+  it('toContent routes a frame-local action to the resolved frame, strips frame, injects offset', async () => {
+    let actionSend = null;
+    chrome.tabs.sendMessage.mockImplementation((id, msg, opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      if (msg.action === '__locate_child_frame') {
+        chrome.runtime.onMessage._fire({ action: '__frame_probe_ack', nonce: msg.params.nonce }, { frameId: 4 });
+        if (cb) cb({ ok: true, origin: { x: 30, y: 40 } });
+        return;
+      }
+      actionSend = { msg, opts };
+      if (cb) cb({ blocks: [] });
+    });
+    const result = await api.toContent(1, 'extract_text', { frame: '#child', max: 5 });
+    expect(result).toEqual({ blocks: [] });
+    expect(actionSend.opts).toEqual({ frameId: 4 });
+    expect(actionSend.msg.params).toMatchObject({ max: 5, __frameOffset: { x: 30, y: 40 }, __framePath: '#child' });
+    expect(actionSend.msg.params.frame).toBeUndefined();
+  });
+
+  it('toContent does NOT route non-frame-local actions — navigate_frame keeps frame + goes to top', async () => {
+    let sent = null;
+    chrome.tabs.sendMessage.mockImplementation((id, msg, opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      sent = { msg, opts };
+      if (cb) cb({ navigated: true });
+    });
+    await api.toContent(1, 'navigate_frame', { frame: '#child', url: 'x' });
+    expect(sent.opts).toEqual({ frameId: 0 });
+    expect(sent.msg.params.frame).toBe('#child');
+  });
+
+  it('toContent sends unframed actions to the top frame', async () => {
+    let sent = null;
+    chrome.tabs.sendMessage.mockImplementation((id, msg, opts, cb) => {
+      if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
+      sent = { msg, opts };
+      if (cb) cb({ blocks: [] });
+    });
+    await api.toContent(1, 'extract_text', { max: 5 });
+    expect(sent.opts).toEqual({ frameId: 0 });
   });
 });
 
@@ -326,7 +425,7 @@ describe('cdpType', () => {
       cb();
     });
 
-    await api.cdpType(1, 'ab');
+    await api.cdpType(1, 'ab', null, false, 0); // wpm=0 → instant, no timer delays
     expect(events).toEqual(['keyDown', 'keyUp', 'keyDown', 'keyUp']);
   });
 
@@ -337,7 +436,7 @@ describe('cdpType', () => {
       if (method === 'Runtime.evaluate') cb({ result: { value: true } });
       else cb({});
     });
-    const out = await api.cdpType(1, 'x', '#email');
+    const out = await api.cdpType(1, 'x', '#email', false, 0);
     expect(calls[0].method).toBe('Runtime.evaluate');
     expect(calls[0].expression).toMatch(/querySelector.*#email/);
     expect(out).toMatchObject({ typed: 1, selector: '#email' });
@@ -364,18 +463,125 @@ describe('cdpType', () => {
 // cdpKey()
 // ============================================================
 describe('cdpKey', () => {
-  it('sends rawKeyDown then keyUp', async () => {
+  it('sends keyDown then keyUp with the Enter virtual key code', async () => {
     const events = [];
     chrome.debugger.sendCommand.mockImplementation((_t, _m, params, cb) => {
-      events.push({ type: params.type, key: params.key });
+      events.push(params);
       cb();
     });
 
-    await api.cdpKey(1, 'Enter', 'Enter', 13);
+    await api.cdpKey(1, 'Enter');
     expect(events).toEqual([
-      { type: 'rawKeyDown', key: 'Enter' },
-      { type: 'keyUp', key: 'Enter' },
+      { type: 'keyDown', key: 'Enter', code: 'Enter', modifiers: 0, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r' },
+      { type: 'keyUp', key: 'Enter', code: 'Enter', modifiers: 0, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 },
     ]);
+  });
+
+  it('Backspace carries windowsVirtualKeyCode 8 so the delete fires', async () => {
+    const events = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, params, cb) => { events.push(params); cb(); });
+    await api.cdpKey(1, 'Backspace');
+    expect(events[0]).toMatchObject({ type: 'rawKeyDown', key: 'Backspace', windowsVirtualKeyCode: 8 });
+    expect(events[1]).toMatchObject({ type: 'keyUp', key: 'Backspace', windowsVirtualKeyCode: 8 });
+  });
+
+  it('chord (Meta+a) holds the modifier and sets the meta bitmask on the key', async () => {
+    const events = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, params, cb) => { events.push(params); cb(); });
+    await api.cdpKey(1, 'a', ['Meta']);
+    // Meta down (no bitmask yet), then 'a' down/up with meta=4, then Meta up.
+    expect(events[0]).toMatchObject({ type: 'rawKeyDown', key: 'Meta' });
+    expect(events[1]).toMatchObject({ type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 4 });
+    // 'a' must NOT carry text when a non-shift modifier is held (it's a command).
+    expect(events[1].text).toBeUndefined();
+    expect(events[2]).toMatchObject({ type: 'keyUp', key: 'a', modifiers: 4 });
+    expect(events[3]).toMatchObject({ type: 'keyUp', key: 'Meta' });
+  });
+
+  it('dispatch cdp_key forwards modifiers', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
+    const result = await api.dispatch('cdp_key', { tabId: 1, key: 'a', modifiers: ['Control'] });
+    expect(result).toEqual({ pressed: 'a', modifiers: ['Control'] });
+  });
+});
+
+// ============================================================
+// cdpType clear + cdpClick multi-click (value-replacement path)
+// ============================================================
+describe('cdpType clear', () => {
+  it('selects-all + Backspace before typing when clear=true', async () => {
+    const keyEvents = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      if (method === 'Input.dispatchKeyEvent') keyEvents.push(params);
+      cb();
+    });
+    const out = await api.cdpType(1, 'new', null, true, 0);
+    // A select-all chord (some modifier held with 'a') must appear before the typed text.
+    const selectAll = keyEvents.find(e => e.key === 'a' && e.modifiers && (e.modifiers & ~8) !== 0);
+    expect(selectAll).toBeTruthy();
+    expect(keyEvents.some(e => e.key === 'Backspace')).toBe(true);
+    expect(out).toMatchObject({ typed: 3, cleared: true });
+  });
+});
+
+describe('cdpClick multi-click', () => {
+  it('triple-click escalates clickCount 1→2→3', async () => {
+    const counts = [];
+    chrome.debugger.sendCommand.mockImplementation((_t, method, params, cb) => {
+      if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') counts.push(params.clickCount);
+      cb();
+    });
+    const out = await api.cdpClick(1, 10, 20, false, null, 3);
+    expect(counts).toEqual([1, 2, 3]);
+    expect(out.clickCount).toBe(3);
+  });
+});
+
+// ============================================================
+// Humanized typing cadence
+// ============================================================
+describe('humanGapMs', () => {
+  const wpm = 110;
+  const base = 60000 / (wpm * 5); // ~109ms
+
+  it('scales with wpm and stays within the jitter band', () => {
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.5); // 0.6+0.5 = 1.1×
+    expect(humanGapMs('x', wpm)).toBeCloseTo(base * 1.1, 5);
+    rnd.mockRestore();
+  });
+
+  it('pauses longer after a space and after punctuation', () => {
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const letter = humanGapMs('x', wpm);
+    expect(humanGapMs(' ', wpm)).toBeCloseTo(letter * 1.8, 5);
+    expect(humanGapMs('.', wpm)).toBeCloseTo(letter * 2.2, 5);
+    rnd.mockRestore();
+  });
+
+  it('clamps to [20, 1500] ms', () => {
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0);
+    expect(humanGapMs('x', 1)).toBe(1500);   // absurdly slow → capped high
+    rnd.mockReturnValue(0);
+    expect(humanGapMs('x', 100000)).toBe(20); // absurdly fast → floored low
+    rnd.mockRestore();
+  });
+});
+
+describe('cdpType cadence', () => {
+  it('defaults to 110 WPM (humanized) when wpm is omitted', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0); // tiny dwell, single char → fast
+    const out = await api.cdpType(1, 'a'); // no wpm
+    expect(out.wpm).toBe(DEFAULT_TYPE_WPM);
+    expect(out).toMatchObject({ typed: 1, cleared: false });
+    rnd.mockRestore();
+  });
+
+  it('wpm=0 disables timing and reports wpm:0', async () => {
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
+    const out = await api.cdpType(1, 'abc', null, false, 0);
+    expect(out.wpm).toBe(0);
+    expect(out.typed).toBe(3);
   });
 });
 
@@ -577,7 +783,7 @@ describe('dispatch', () => {
     chrome.debugger.attach.mockResolvedValue(undefined);
     chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
     const result = await api.dispatch('cdp_click', { tabId: 1, x: 10, y: 20 });
-    expect(result).toEqual({ clicked: true, x: 10, y: 20, shift: false });
+    expect(result).toMatchObject({ clicked: true, x: 10, y: 20, shift: false, clickCount: 1 });
   });
 
   it('cdp_click with shift', async () => {
@@ -588,8 +794,8 @@ describe('dispatch', () => {
 
   it('cdp_type — types text', async () => {
     chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => cb());
-    const result = await api.dispatch('cdp_type', { tabId: 1, text: 'hi' });
-    expect(result).toEqual({ typed: 2 });
+    const result = await api.dispatch('cdp_type', { tabId: 1, text: 'hi', wpm: 0 });
+    expect(result).toMatchObject({ typed: 2, cleared: false, wpm: 0 });
   });
 
   it('cdp_key — presses key from map', async () => {
@@ -627,7 +833,7 @@ describe('dispatch', () => {
 
   it('content-script actions route through toContent', async () => {
     // Mock the chain: resolveTab → ensureContentScript → sendMessage
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ found: 1, results: [{ text: 'hi' }] });
     });
@@ -638,7 +844,7 @@ describe('dispatch', () => {
 
   it('inspect_form — without url, routes straight to toContent', async () => {
     chrome.tabs.query.mockResolvedValue([{ id: 4 }]);
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ form: { action: '' }, fields: [] });
     });
@@ -651,7 +857,7 @@ describe('dispatch', () => {
 
   it('inspect_form — with url already on target, skips navigation', async () => {
     chrome.tabs.get.mockResolvedValue({ id: 4, url: 'https://app.example/new?x=1', status: 'complete' });
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ form: {}, fields: [] });
     });
@@ -662,7 +868,7 @@ describe('dispatch', () => {
 
   it('inspect_form — with url off target, navigates then inspects', async () => {
     chrome.tabs.get.mockResolvedValue({ id: 4, url: 'https://other.example/', status: 'complete' });
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ form: {}, fields: [] });
     });
@@ -672,7 +878,7 @@ describe('dispatch', () => {
   });
 
   it('prepare_for_user_click — routes to content script and broadcasts a handoff', async () => {
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ found: true, label: 'Allow', bbox: { x: 1, y: 2, width: 3, height: 4 } });
     });
@@ -684,7 +890,7 @@ describe('dispatch', () => {
   });
 
   it('prepare_for_user_click — emits a handoff broadcast row for the popup', async () => {
-    chrome.tabs.sendMessage.mockImplementation((id, msg, cb) => {
+    chrome.tabs.sendMessage.mockImplementation((id, msg, _opts, cb) => {
       if (msg.action === 'ping') { if (cb) cb({ ok: true }); return; }
       if (cb) cb({ found: true, label: 'Allow' });
     });

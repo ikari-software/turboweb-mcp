@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -19,6 +20,27 @@ func registerBrowserTools(s *server.MCPServer) {
 			mcp.WithBoolean("headless", mcp.Description("Launch in headless mode (default false)")),
 		),
 		handleLaunchBrowser,
+	)
+
+	// --- connect_bidi ---
+	addTool(s,
+		mcp.NewTool("connect_bidi",
+			mcp.WithDescription(
+				"Attach WebDriver BiDi to an ALREADY-RUNNING browser you started yourself with "+
+					"--remote-debugging-port=<port>. Unlike launch_browser (which opens a fresh, "+
+					"throwaway profile), this connects to YOUR everyday browser + profile — useful on "+
+					"Firefox/Zen, where trusted cdp_* input has no other route (the Firefox extension "+
+					"has no chrome.debugger). On Chrome you usually don't need this: the extension "+
+					"already provides trusted cdp_* input via chrome.debugger.\n\n"+
+					"The browser must already be running with the debug port. Start it like:\n"+
+					"  Zen/Firefox:  zen --remote-debugging-port=9222 --remote-allow-origins=*\n"+
+					"  Chrome:       chrome --remote-debugging-port=9222\n"+
+					"then call connect_bidi with that port. Check the result with connection_status (bidi:true).",
+			),
+			mcp.WithNumber("port", mcp.Required(), mcp.Description(
+				"The --remote-debugging-port the browser was started with (e.g. 9222).")),
+		),
+		handleConnectBiDi,
 	)
 
 	// --- connection_status ---
@@ -440,6 +462,42 @@ func handleLaunchBrowser(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 		"stealth":  true,
 		"message":  "Chrome launched with --silent-debugger-extension-api (no debugging infobar)",
 	})
+}
+
+func handleConnectBiDi(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	port := int(toFloat(args["port"]))
+	if port <= 0 || port > 65535 {
+		return mcp.NewToolResultError(
+			"connect_bidi: provide a valid `port` — the --remote-debugging-port your browser " +
+				"was started with (e.g. 9222)."), nil
+	}
+	if getBiDi() != nil {
+		return textResult(map[string]any{
+			"connected": true,
+			"already":   true,
+			"note":      "BiDi was already connected. Restart the browser and call again to reconnect to a new session.",
+		})
+	}
+	// A few short attempts so the tool returns promptly with a real verdict —
+	// the browser is already running, so it should answer on the first try.
+	var wsURL string
+	var lastErr error
+	for i := 0; i < 6; i++ {
+		if wsURL, lastErr = tryConnectBiDi(port); lastErr == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"connect_bidi: no WebDriver BiDi endpoint answered on port %d (%v). Start the browser "+
+				"WITH the debug port first, then retry — e.g. `zen --remote-debugging-port=%d "+
+				"--remote-allow-origins=*` (Firefox/Zen) or `chrome --remote-debugging-port=%d` "+
+				"(Chrome). The browser must already be running.",
+			port, lastErr, port, port)), nil
+	}
+	return textResult(map[string]any{"connected": true, "bidi": true, "wsURL": wsURL, "port": port})
 }
 
 func handleConnectionStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
