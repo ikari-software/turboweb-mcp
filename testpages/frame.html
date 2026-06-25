@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frame</title>
+<style>
+  :root { --accent: #888; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 14px;
+         border: 4px solid var(--accent); min-height: 100vh; }
+  h1 { font-size: 16px; margin: 0 0 2px; }
+  .origin { font: 12px/1.3 ui-monospace, monospace; color: #555; word-break: break-all; }
+  .banner { background: var(--accent); color: #fff; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; }
+  .banner h1, .banner .origin { color: #fff; }
+  fieldset { border: 1px solid #ddd; border-radius: 6px; margin: 0 0 12px; padding: 10px 12px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; font-size: 12px; color: #444; margin: 8px 0 2px; }
+  input { width: 100%; padding: 6px 8px; font-size: 14px; border: 1px solid #bbb; border-radius: 4px; }
+  button { margin-top: 8px; padding: 8px 14px; font-size: 14px; border: 0; border-radius: 5px;
+           background: var(--accent); color: #fff; cursor: pointer; }
+  .stat { font: 12px/1.4 ui-monospace, monospace; color: #333; }
+  .stat b { color: #000; }
+  .mirror { font: 12px ui-monospace, monospace; color: #0a6; }
+  #log { font: 11px/1.4 ui-monospace, monospace; background: #f6f6f6; border: 1px solid #e0e0e0;
+         border-radius: 4px; padding: 8px; height: 120px; overflow: auto; white-space: pre-wrap; }
+  .findme { background: #fff3cd; padding: 4px 6px; border-radius: 4px; display: inline-block; }
+</style>
+</head>
+<body>
+  <div class="banner">
+    <h1 id="label">frame</h1>
+    <div class="origin" id="origin"></div>
+  </div>
+
+  <p>Findable phrase: <span class="findme" id="phrase">findme-default</span></p>
+
+  <fieldset>
+    <legend>Plain input</legend>
+    <label for="plain">type / fill here</label>
+    <input id="plain" placeholder="empty">
+    <div class="stat">value: <b id="plain-val">(empty)</b></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Controlled input (reverts naive .value sets)</legend>
+    <label for="controlled">A framework owns this value — set it WITHOUT firing input and it snaps back</label>
+    <input id="controlled" placeholder="empty">
+    <div class="stat">framework state: <span class="mirror" id="ctrl-state">(empty)</span></div>
+    <div class="stat">last InputEvent → type: <b id="ctrl-type">—</b> &nbsp; data: <b id="ctrl-data">—</b></div>
+    <div class="stat">reverted naive sets: <b id="ctrl-reverts">0</b></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Replace-me field (test clear / select-all / triple-click)</legend>
+    <label for="prefilled">starts with text — replacing it should leave ONLY the new value</label>
+    <input id="prefilled" value="REPLACE ME">
+    <div class="stat">value: <b id="prefilled-val">REPLACE ME</b></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Click target</legend>
+    <button id="btn">Click me</button>
+    <div class="stat">clicks: <b id="btn-count">0</b> &nbsp; last button focused: <b id="focus-flag">no</b></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Event log (proves which frame the action hit)</legend>
+    <div id="log"></div>
+  </fieldset>
+
+<script>
+(function () {
+  const q = new URLSearchParams(location.search);
+  const label = q.get('label') || 'FRAME';
+  const accent = q.get('accent') || '#3367d6';
+  const phrase = q.get('phrase') || ('findme-' + label.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+
+  document.documentElement.style.setProperty('--accent', accent);
+  document.title = label;
+  document.getElementById('label').textContent = label;
+  document.getElementById('origin').textContent = location.origin + location.pathname;
+  document.getElementById('phrase').textContent = phrase;
+
+  const logEl = document.getElementById('log');
+  function log(msg) {
+    const t = new Date().toISOString().slice(11, 23);
+    logEl.textContent += `[${t}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  log(`ready — ${label} @ ${location.origin}`);
+
+  // Programmatic state for optional assertions (the visible UI is the source of truth).
+  const state = window.__turbotest = {
+    label, origin: location.origin,
+    clicks: 0, plain: '', controlled: '', prefilled: 'REPLACE ME',
+    lastInputType: null, lastInputData: null, naiveReverts: 0,
+  };
+
+  // --- Plain input ---
+  const plain = document.getElementById('plain');
+  plain.addEventListener('input', (e) => {
+    state.plain = plain.value;
+    document.getElementById('plain-val').textContent = plain.value || '(empty)';
+    log(`plain input → "${plain.value}" (inputType=${e.inputType})`);
+  });
+
+  // --- Prefilled / replace-me input ---
+  const prefilled = document.getElementById('prefilled');
+  prefilled.addEventListener('input', (e) => {
+    state.prefilled = prefilled.value;
+    document.getElementById('prefilled-val').textContent = prefilled.value || '(empty)';
+    log(`prefilled input → "${prefilled.value}" (inputType=${e.inputType})`);
+  });
+
+  // --- Controlled input: a faithful "framework owns the value" model ---
+  // The framework's state only changes via the `input` event. A periodic
+  // reconcile (like a render loop) writes state back through the prototype
+  // value setter. So setting input.value directly WITHOUT dispatching `input`
+  // (the naive automation bug) leaves state stale and the field snaps back —
+  // while the native-setter + InputEvent path (our fix) updates state and sticks.
+  const controlled = document.getElementById('controlled');
+  const protoSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  const ctrlState = document.getElementById('ctrl-state');
+  controlled.addEventListener('input', (e) => {
+    state.controlled = controlled.value;
+    state.lastInputType = e.inputType;
+    state.lastInputData = e.data;
+    ctrlState.textContent = controlled.value || '(empty)';
+    document.getElementById('ctrl-type').textContent = e.inputType || '(none)';
+    document.getElementById('ctrl-data').textContent = e.data === null ? 'null' : JSON.stringify(e.data);
+    log(`controlled input → "${controlled.value}" (inputType=${e.inputType}, data=${JSON.stringify(e.data)})`);
+  });
+  setInterval(() => {
+    if (controlled.value !== state.controlled) {
+      // Reconcile: revert the field to framework state (naive set detected).
+      protoSetter.call(controlled, state.controlled);
+      state.naiveReverts++;
+      document.getElementById('ctrl-reverts').textContent = state.naiveReverts;
+      log(`⟳ reconciled controlled input back to "${state.controlled}" (naive set reverted)`);
+    }
+  }, 400);
+
+  // --- Click target ---
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', () => {
+    state.clicks++;
+    document.getElementById('btn-count').textContent = state.clicks;
+    log(`button click #${state.clicks}`);
+  });
+  btn.addEventListener('focus', () => {
+    document.getElementById('focus-flag').textContent = 'yes';
+    log('button focused');
+  });
+})();
+</script>
+</body>
+</html>

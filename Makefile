@@ -10,7 +10,7 @@ GITHUB_REPO = ikari-software/turboweb-mcp
 # /usr/local. Override with `make install PREFIX=/path`.
 PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
 
-.PHONY: build install release notarize-darwin clean test test-go test-extension extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
+.PHONY: build install release notarize-darwin clean test test-go test-extension testpages extension extension-watch extension-zip extension-xpi chrome-store firefox-updates-json watch
 
 # Local dev binary lives in bin/. Release archives (zips, signed .xpi,
 # cross-compiled binaries) live in dist/.
@@ -202,6 +202,11 @@ test-go:
 
 test-extension:
 	cd extension && npm test
+
+# Launch the cross-origin frame test harness (3 origins on loopback ports).
+# Open http://127.0.0.1:8080/ in the browser the extension is attached to.
+testpages:
+	node testpages/serve.js
 
 clean:
 	rm -rf bin/$(BINARY)* dist extension/coverage extension/dist
