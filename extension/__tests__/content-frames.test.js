@@ -19,7 +19,7 @@ beforeAll(() => {
     'sel', 'resolveRoot', 'deepElementFromPoint', 'listFrames', 'frameSeg',
     'queryElements', 'findText', 'extractText', 'inspectElement',
     'clickElement', 'getHTML', 'getInteractiveMap',
-    'resolveFrameElement', 'navigateFrame',
+    'resolveFrameElement', 'navigateFrame', 'locateChildFrame',
   ].join(', ');
   code = code.replace(/\}\)\(\);?\s*$/, `globalThis.__contentAPI = { ${fns} };\n})();`);
   new vm.Script(code, { filename: filePath }).runInThisContext();
@@ -267,5 +267,42 @@ describe('clickElement coordinate piercing', () => {
     // local centre (10+20, 10+10) = (30,20) → +frame origin (100,50) = (130,70)
     expect(out.x).toBe(130);
     expect(out.y).toBe(70);
+  });
+});
+
+describe('locateChildFrame (cross-origin frameId handshake)', () => {
+  it('finds the iframe by selector, posts the nonce into it, returns the child origin', () => {
+    const { iframe } = addFrame(document, document.body, 'embed', { fx: 120, fy: 60 });
+    let posted = null;
+    iframe.contentWindow.postMessage = (data) => { posted = data; };
+
+    const out = api.locateChildFrame({ selector: '#embed', nonce: 'abc123' });
+    expect(out).toEqual({ ok: true, origin: { x: 120, y: 60 } });
+    expect(posted).toEqual({ __turbo_frame_probe: 'abc123' });
+  });
+
+  it('throws when the selector matches no frame', () => {
+    expect(() => api.locateChildFrame({ selector: '#nope', nonce: 'n' }))
+      .toThrow(/Frame not found/);
+  });
+
+  it('throws when the selector resolves to a non-frame element', () => {
+    document.body.innerHTML = '<div id="notaframe"></div>';
+    expect(() => api.locateChildFrame({ selector: '#notaframe', nonce: 'n' }))
+      .toThrow(/Not a frame/);
+  });
+});
+
+describe('frame probe ack listener', () => {
+  it('acks to the background with the nonce when a probe message arrives', () => {
+    chrome.runtime.sendMessage.mockClear();
+    window.dispatchEvent(new window.MessageEvent('message', { data: { __turbo_frame_probe: 'nonce-xyz' } }));
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ action: '__frame_probe_ack', nonce: 'nonce-xyz' });
+  });
+
+  it('ignores unrelated postMessages', () => {
+    chrome.runtime.sendMessage.mockClear();
+    window.dispatchEvent(new window.MessageEvent('message', { data: { hello: 'world' } }));
+    expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
   });
 });

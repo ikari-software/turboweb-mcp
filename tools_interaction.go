@@ -71,18 +71,25 @@ func registerInteractionTools(s *server.MCPServer) {
 		mcp.NewTool("cdp_click",
 			mcp.WithDescription(
 				"Click using real browser input (trusted events, bypasses MUI portals, dropdowns, "+
-					"and isTrusted-guarded handlers). Provide ONE of:\n"+
+					"and isTrusted-guarded handlers). Prefer selector over x,y — selectors are stable "+
+					"across scroll/reflow, and when combined with `frame` they are the ONLY reliable "+
+					"way to target inside a cross-origin frame (coordinates don't translate across the "+
+					"origin boundary). Provide ONE of:\n"+
 					"  • selector — the click lands on the element's centre, resolved via "+
-					"getBoundingClientRect on the page side. Preferred when you know the element.\n"+
-					"  • x,y — explicit viewport coordinates. Use when targeting a canvas, "+
+					"getBoundingClientRect on the page side. Preferred.\n"+
+					"  • x,y — explicit viewport coordinates. Use only when targeting a canvas, "+
 					"an OS-level chrome region, or anywhere a selector doesn't apply.\n"+
 					"If both are given, selector wins. Errors if neither is provided or the "+
-					"selector matches nothing / has zero-size bbox.",
+					"selector matches nothing / has zero-size bbox.\n\n"+
+					"clickCount=2 double-clicks (selects a word); clickCount=3 triple-clicks "+
+					"(selects all text in an input/line) — the trusted way to select a field's "+
+					"contents before replacing them.",
 			),
 			mcp.WithString("selector", mcp.Description("CSS selector. Click lands on the element's centre.")),
 			mcp.WithNumber("x", mcp.Description("X viewport coordinate (required if no selector)")),
 			mcp.WithNumber("y", mcp.Description("Y viewport coordinate (required if no selector)")),
 			mcp.WithBoolean("shift", mcp.Description("Hold Shift key during click (for multi-select)")),
+			mcp.WithNumber("clickCount", mcp.Description("1=single (default), 2=double-click (select word), 3=triple-click (select all field text)")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 			frameOpt(),
 		),
@@ -100,18 +107,33 @@ func registerInteractionTools(s *server.MCPServer) {
 			),
 			mcp.WithString("text", mcp.Required(), mcp.Description("Text to type character by character")),
 			mcp.WithString("selector", mcp.Description("Optional CSS selector — focus this element before typing")),
-			mcp.WithBoolean("clear", mcp.Description("Select-all + delete before typing (default false)")),
+			mcp.WithBoolean("clear", mcp.Description("Select-all + delete before typing — replaces the existing value (default false). Works on every backend.")),
+			mcp.WithNumber("wpm", mcp.Description(
+				"Typing speed in words/min. Keystrokes are dispatched at a human cadence "+
+					"(jitter + longer pauses after spaces/punctuation) — defaults to 110. "+
+					"Set 0 for instant machine-speed typing (no inter-key delay).")),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 			frameOpt(),
 		),
 		bidiOrFallback("cdp_type", handleBiDiType),
 	)
 
-	// --- cdp_key (now via BiDi input.performActions) ---
+	// --- cdp_key (real browser input via BiDi/CDP) ---
 	addTool(s,
 		mcp.NewTool("cdp_key",
-			mcp.WithDescription("Press a single key via real browser input. Supports: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab."),
-			mcp.WithString("key", mcp.Required(), mcp.Description("Key name: Enter, Escape, ArrowDown, ArrowUp, Backspace, Tab")),
+			mcp.WithDescription(
+				"Press a single key via real browser input, optionally holding modifiers "+
+					"(chords). Editing keys perform their native action — Backspace/Delete "+
+					"delete, Enter submits, arrows/Home/End/PageUp/PageDown move the caret.\n\n"+
+					"modifiers lets you send chords like select-all (Meta+a on macOS, "+
+					"Control+a elsewhere), Shift+Tab, or Control+ArrowRight. To clear a field "+
+					"you can also just use cdp_type clear=true.",
+			),
+			mcp.WithString("key", mcp.Required(), mcp.Description(
+				"Key name (Enter, Escape, Tab, Backspace, Delete, Home, End, PageUp, "+
+					"PageDown, ArrowUp/Down/Left/Right, F1-F12) or a single character (e.g. \"a\").")),
+			mcp.WithArray("modifiers", mcp.Description("Modifier keys held during the press: any of Meta, Control, Alt, Shift."),
+				mcp.Items(map[string]any{"type": "string", "enum": []string{"Meta", "Control", "Alt", "Shift"}})),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 			frameOpt(),
 		),
@@ -359,6 +381,7 @@ func handleBiDiClick(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	activateIfDefault(ctx, args["tabId"])
 	// localX/localY are in the target context's own viewport (where BiDi input
 	// dispatches); reportX/reportY are translated back to the top viewport.
 	var localX, localY float64
@@ -376,10 +399,17 @@ func handleBiDiClick(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	} else {
 		return mcp.NewToolResultError("cdp_click: provide either selector or x,y coordinates"), nil
 	}
-	if err := bidiClick(ctx, ctxID, localX, localY, "left"); err != nil {
+	clickCount := int(toFloat(args["clickCount"]))
+	if clickCount < 1 {
+		clickCount = 1
+	}
+	if clickCount > 3 {
+		clickCount = 3
+	}
+	if err := bidiClickN(ctx, ctxID, localX, localY, "left", clickCount); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	out := map[string]any{"clicked": true, "x": localX + offX, "y": localY + offY}
+	out := map[string]any{"clicked": true, "x": localX + offX, "y": localY + offY, "clickCount": clickCount}
 	if sel != "" {
 		out["selector"] = sel
 	}
@@ -389,6 +419,25 @@ func handleBiDiClick(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	return textResult(out)
 }
 
+// activateIfDefault foregrounds the target tab ONLY when it is already the
+// daemon's default (active) context. Firefox needs a tab foregrounded for
+// element.focus() and reliable key input — but we must never yank a BACKGROUND
+// tab forward, which would hijack what the human is looking at. Acting on the
+// default tab (the no-tabId / active-tab case) is what the agent does anyway,
+// so activating it there is expected and non-disruptive; a tab explicitly
+// targeted in the background is left where it is.
+func activateIfDefault(ctx context.Context, tabId any) {
+	top, err := resolveContext(tabId)
+	if err != nil {
+		return
+	}
+	def, derr := resolveContext(nil)
+	if derr != nil || top != def {
+		return
+	}
+	_ = bidiActivate(ctx, top)
+}
+
 func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	frameSpec := toString(args["frame"])
@@ -396,6 +445,7 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	activateIfDefault(ctx, args["tabId"])
 	sel := toString(args["selector"])
 	if sel != "" {
 		if err := focusSelector(ctx, ctxID, sel); err != nil {
@@ -408,10 +458,19 @@ func handleBiDiType(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 	}
-	if err := bidiType(ctx, ctxID, text); err != nil {
+	// Humanized cadence is ON by default (~110 WPM). wpm=0 means instant.
+	wpm := DefaultTypeWPM
+	if v, ok := args["wpm"]; ok {
+		wpm = int(toFloat(v))
+	}
+	if wpm > 0 {
+		if err := bidiTypeHuman(ctx, ctxID, text, wpm); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	} else if err := bidiType(ctx, ctxID, text); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	out := map[string]any{"typed": len(text)}
+	out := map[string]any{"typed": len(text), "wpm": wpm}
 	if sel != "" {
 		out["selector"] = sel
 	}
@@ -429,10 +488,14 @@ func handleBiDiKey(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolR
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	key := toString(args["key"])
-	if err := bidiKey(ctx, ctxID, key); err != nil {
+	mods := toStringSlice(args["modifiers"])
+	if err := bidiKeyChord(ctx, ctxID, key, mods); err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	out := map[string]any{"pressed": key}
+	if len(mods) > 0 {
+		out["modifiers"] = mods
+	}
 	if frameSpec != "" {
 		out["frame"] = frameSpec
 	}

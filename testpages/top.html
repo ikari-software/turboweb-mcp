@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TurboWeb cross-origin frame test — TOP (A)</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; background: #fafafa; }
+  header { background: #1565c0; color: #fff; padding: 12px 16px; border-radius: 8px; }
+  header h1 { margin: 0 0 4px; font-size: 18px; }
+  header .origin { font: 12px ui-monospace, monospace; opacity: .9; }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; margin-top: 16px; }
+  .cell { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; }
+  .cell h2 { font-size: 13px; margin: 0 0 4px; }
+  .cell code { font: 12px ui-monospace, monospace; background: #eef; padding: 1px 5px; border-radius: 3px; }
+  .cell.wide { grid-column: 1 / -1; }
+  iframe { width: 100%; height: 620px; border: 0; border-radius: 6px; }
+  .cheat { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px 16px; margin-top: 16px; }
+  .cheat h2 { font-size: 14px; margin: 0 0 8px; }
+  .cheat table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .cheat td, .cheat th { border: 1px solid #eee; padding: 6px 8px; text-align: left; vertical-align: top; }
+  .cheat code { font: 12px ui-monospace, monospace; background: #f3f3f3; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>TurboWeb MCP — cross-origin frame test harness</h1>
+    <div class="origin" id="origin"></div>
+  </header>
+
+  <div class="grid">
+    <div class="cell">
+      <h2>Same-origin child — framePath <code>#same</code></h2>
+      <iframe id="same" title="same-origin A"></iframe>
+    </div>
+    <div class="cell">
+      <h2>Cross-origin child (B) — framePath <code>#cross</code></h2>
+      <iframe id="cross" title="cross-origin B"></iframe>
+    </div>
+    <div class="cell wide">
+      <h2>Nested cross-origin A→B→C — framePath <code>#nested &gt; #grandchild</code></h2>
+      <iframe id="nested" title="nested B"></iframe>
+    </div>
+  </div>
+
+  <div class="cheat">
+    <h2>What to test (address frames by SELECTOR, never coordinates)</h2>
+    <table>
+      <tr><th>Scenario</th><th><code>frame</code> argument</th><th>Try</th></tr>
+      <tr><td>Same-origin</td><td><code>#same</code></td><td><code>extract_text</code>, <code>find_text "findme-same-a"</code>, <code>click #btn</code></td></tr>
+      <tr><td>Cross-origin (B)</td><td><code>#cross</code></td><td><code>find_text "findme-cross-b"</code>, <code>click #btn</code>, <code>fill_input #plain</code></td></tr>
+      <tr><td>Nested A→B→C</td><td><code>#nested &gt; #grandchild</code></td><td><code>find_text "findme-grandchild-c"</code>, <code>click #btn</code></td></tr>
+      <tr><td>Replace a value</td><td>any frame</td><td><code>cdp_type clear=true</code> or <code>fill_input</code> on <code>#prefilled</code> → should read exactly the new value</td></tr>
+      <tr><td>Controlled input</td><td>any frame</td><td><code>fill_input #controlled</code> sticks; a naive <code>execute_js</code> <code>el.value=…</code> reverts within ~0.4s</td></tr>
+      <tr><td>Select / chord</td><td>top or frame</td><td><code>cdp_click #prefilled clickCount=3</code>, <code>cdp_key a modifiers=[Meta]</code>, <code>cdp_key Backspace</code></td></tr>
+    </table>
+    <p>Each frame shows a live <strong>event log</strong> and counters — read them with <code>extract_text</code> or a screenshot to confirm the action hit the right frame.</p>
+  </div>
+
+<script>
+(function () {
+  document.getElementById('origin').textContent = 'TOP origin (A): ' + location.origin;
+  const host = location.protocol + '//' + location.hostname;
+  const pA = +location.port;
+  const A = location.origin;
+  const B = `${host}:${pA + 1}`;
+  const f = (origin, label, accent, phrase) =>
+    `${origin}/frame.html?label=${encodeURIComponent(label)}&accent=${encodeURIComponent(accent)}&phrase=${encodeURIComponent(phrase)}`;
+
+  document.getElementById('same').src   = f(A, 'SAME-ORIGIN (A)', '#2e7d32', 'findme-same-a');
+  document.getElementById('cross').src  = f(B, 'CROSS-ORIGIN (B)', '#c62828', 'findme-cross-b');
+  document.getElementById('nested').src = `${B}/nested.html`;
+})();
+</script>
+</body>
+</html>

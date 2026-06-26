@@ -134,6 +134,15 @@ func bidiPrint(ctx context.Context, contextID string, landscape bool, scale floa
 // =============================================================================
 
 func bidiClick(ctx context.Context, contextID string, x, y float64, button string) error {
+	return bidiClickN(ctx, contextID, x, y, button, 1)
+}
+
+// bidiClickN dispatches a trusted click of `count` presses at the same point.
+// count=2 (double-click) selects a word; count=3 (triple-click) selects the
+// whole field/line — the trusted way to "select the field" before replacing
+// its value. The browser groups consecutive down/up pairs at one coordinate
+// into a multi-click; we keep them tight (no intervening move) so it does.
+func bidiClickN(ctx context.Context, contextID string, x, y float64, button string, count int) error {
 	c, err := requireBiDi()
 	if err != nil {
 		return err
@@ -141,25 +150,36 @@ func bidiClick(ctx context.Context, contextID string, x, y float64, button strin
 	if button == "" {
 		button = "left"
 	}
-	// BiDi input.performActions with pointer source
 	_, err = c.Send(ctx, "input.performActions", map[string]any{
 		"context": contextID,
 		"actions": []map[string]any{
 			{
-				"type": "pointer",
-				"id":   "mouse",
-				"parameters": map[string]any{
-					"pointerType": "mouse",
-				},
-				"actions": []map[string]any{
-					{"type": "pointerMove", "x": int(x), "y": int(y)},
-					{"type": "pointerDown", "button": pointerButton(button)},
-					{"type": "pointerUp", "button": pointerButton(button)},
-				},
+				"type":       "pointer",
+				"id":         "mouse",
+				"parameters": map[string]any{"pointerType": "mouse"},
+				"actions":    pointerClickActions(x, y, button, count),
 			},
 		},
 	})
 	return err
+}
+
+// pointerClickActions builds a pointerMove followed by `count` down/up pairs
+// at the same point — count>1 produces a trusted double/triple-click. Pure
+// (no client) so it's unit-testable.
+func pointerClickActions(x, y float64, button string, count int) []map[string]any {
+	if count < 1 {
+		count = 1
+	}
+	btn := pointerButton(button)
+	actions := []map[string]any{{"type": "pointerMove", "x": int(x), "y": int(y)}}
+	for i := 0; i < count; i++ {
+		actions = append(actions,
+			map[string]any{"type": "pointerDown", "button": btn},
+			map[string]any{"type": "pointerUp", "button": btn},
+		)
+	}
+	return actions
 }
 
 func bidiType(ctx context.Context, contextID string, text string) error {
@@ -189,6 +209,16 @@ func bidiType(ctx context.Context, contextID string, text string) error {
 	return err
 }
 
+// bidiActivate brings a top-level browsing context (tab) to the foreground.
+func bidiActivate(ctx context.Context, contextID string) error {
+	c, err := requireBiDi()
+	if err != nil {
+		return err
+	}
+	_, err = c.Send(ctx, "browsingContext.activate", map[string]any{"context": contextID})
+	return err
+}
+
 // bidiKey presses a special key (Enter, Escape, ArrowDown, etc.)
 func bidiKey(ctx context.Context, contextID string, key string) error {
 	c, err := requireBiDi()
@@ -210,6 +240,31 @@ func bidiKey(ctx context.Context, contextID string, key string) error {
 		},
 	})
 	return err
+}
+
+// bidiKeyChord presses `key` while holding `modifiers` (e.g. Meta+a, Shift+Tab).
+// Modifiers go down first, then the key down+up, then modifiers release in
+// reverse — the standard chord ordering so the browser fires the native
+// shortcut (select-all, etc.). With no modifiers it's a plain key press.
+func bidiKeyChord(ctx context.Context, contextID string, key string, modifiers []string) error {
+	return bidiKeyboardRawActions(ctx, contextID, keyChordActions(key, modifiers))
+}
+
+// keyChordActions builds the keyDown/keyUp sequence for `key` held with
+// `modifiers`: modifiers down, key down, key up, modifiers up (reverse). Pure
+// (no client) so it's unit-testable.
+func keyChordActions(key string, modifiers []string) []map[string]any {
+	var down, up []map[string]any
+	for _, m := range modifiers {
+		down = append(down, map[string]any{"type": "keyDown", "value": keyToUnicode(m)})
+	}
+	kv := keyToUnicode(key)
+	down = append(down, map[string]any{"type": "keyDown", "value": kv})
+	up = append(up, map[string]any{"type": "keyUp", "value": kv})
+	for i := len(modifiers) - 1; i >= 0; i-- {
+		up = append(up, map[string]any{"type": "keyUp", "value": keyToUnicode(modifiers[i])})
+	}
+	return append(down, up...)
 }
 
 // bidiKeyboardRawActions sends a custom key action sequence (modifier chords, etc.).

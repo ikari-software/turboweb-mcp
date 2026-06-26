@@ -172,9 +172,19 @@
     return { doc, win, offset: { x: offX, y: offY }, framePath: parts.join(' > '), isSameOrigin: true };
   }
 
+  // Set by the message router (per call) when the background has already routed
+  // this message to the target frame via frameId and passed the cumulative
+  // top-viewport offset. In that case the op runs on THIS frame's own document.
+  let _injectedFrame = null;
+
   // Resolve a frame spec and assert the content script can actually read it.
   // Returns { root, off, framePath }. Throws an actionable error for cross-origin.
   function frameCtx(frameSpec) {
+    // Routed child-frame op: background targeted us directly and supplied the
+    // offset — operate locally. (frameSpec is stripped to '' for routed calls.)
+    if (!frameSpec && _injectedFrame) {
+      return { root: document, off: _injectedFrame.offset, framePath: _injectedFrame.framePath };
+    }
     const r = resolveRoot(frameSpec);
     if (!r.doc) {
       throw new Error(
@@ -184,6 +194,28 @@
       );
     }
     return { root: r.doc, off: r.offset, framePath: r.framePath };
+  }
+
+  // --- Cross-origin frame correlation (all_frames routing) ---
+  // The background maps a selector-path to a Chrome frameId one hop at a time.
+  // For each hop it calls this in the PARENT frame: find the child <iframe> by
+  // selector and postMessage a nonce into it. The child's content script (this
+  // same code, running there) hears the nonce and acks to the background, which
+  // reads the trusted sender.frameId. We return the child viewport's origin
+  // within this frame so the background can accumulate the top-viewport offset.
+  function locateChildFrame({ selector, nonce }) {
+    let el;
+    try { el = document.querySelector(selector); }
+    catch { throw new Error('Invalid frame selector: ' + JSON.stringify(selector)); }
+    if (!el) throw new Error('Frame not found in this document: ' + selector);
+    if (el.tagName !== 'IFRAME' && el.tagName !== 'FRAME') {
+      throw new Error('Not a frame: ' + selector + ' resolved to <' + el.tagName.toLowerCase() + '>');
+    }
+    const win = el.contentWindow;
+    if (!win) throw new Error('Frame has no contentWindow: ' + selector);
+    const o = frameContentOrigin(el);
+    win.postMessage({ __turbo_frame_probe: String(nonce) }, '*');
+    return { ok: true, origin: { x: o.x, y: o.y } };
   }
 
   // Hit-test that descends through SAME-ORIGIN iframes. Standard
@@ -738,8 +770,14 @@
     } else if (x !== undefined && y !== undefined) {
       // Hit-test descends through same-origin iframes — a coordinate click no
       // longer stops at the <iframe> wrapper and lands on the real leaf element.
-      const hit = deepElementFromPoint(x, y);
-      el = hit.el; off = hit.offset; framePath = hit.framePath;
+      // In a routed child frame the agent's x,y are top-viewport coordinates;
+      // translate them into this frame's local viewport before hit-testing, and
+      // translate the reported coords back.
+      const base = _injectedFrame ? _injectedFrame.offset : { x: 0, y: 0 };
+      const hit = deepElementFromPoint(x - base.x, y - base.y);
+      el = hit.el;
+      off = { x: hit.offset.x + base.x, y: hit.offset.y + base.y };
+      framePath = _injectedFrame ? _injectedFrame.framePath : hit.framePath;
       if (!el) throw new Error(`No element at (${x}, ${y})`);
     } else {
       throw new Error('Provide selector or x,y coordinates');
@@ -879,6 +917,20 @@
     };
   }
 
+  // Dispatch a bubbling InputEvent carrying inputType + data. Frameworks that
+  // gate on event.inputType (input masks, some MUI/validation layers) ignore a
+  // plain Event('input'); InputEvent gives them the metadata a real keystroke
+  // would. Falls back to Event where InputEvent is unavailable (very old hosts).
+  function dispatchInput(el, inputType, data) {
+    let ev;
+    try {
+      ev = new InputEvent('input', { bubbles: true, inputType, data });
+    } catch (_) {
+      ev = new Event('input', { bubbles: true });
+    }
+    el.dispatchEvent(ev);
+  }
+
   // --- Type text ---
   function typeText({ selector, text, clear = false, pressEnter = false, frame }) {
     let el, selectorNote = null;
@@ -916,7 +968,11 @@
       const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
       const next = clear ? text : (el.value + text);
       nativeSetter.call(el, next);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      // Dispatch a real InputEvent (not a bare Event): some controlled
+      // components read event.inputType / event.data and ignore an event
+      // that lacks them. inputType 'insertText' with data=text matches what
+      // the browser fires for typed input.
+      dispatchInput(el, 'insertText', text);
       el.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
       // contenteditable / other editable hosts have no .value — execCommand
@@ -989,7 +1045,7 @@
       : (ownerWin.HTMLInputElement || HTMLInputElement).prototype;
     const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
     nativeSetter.call(el, value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
+    dispatchInput(el, 'insertReplacementText', value);
     el.dispatchEvent(new Event('change', { bubbles: true }));
 
     const stuck = el.value === value;
@@ -3093,6 +3149,21 @@
     };
   }
 
+  // --- Cross-origin frame probe ack ---
+  // When our parent frame's content script posts a nonce into us (during
+  // selector→frameId resolution), ack to the background, which reads our
+  // trusted sender.frameId. This runs in every frame, including cross-origin
+  // ones the top frame cannot script. The nonce is random and single-use; the
+  // page's own scripts can observe it but cannot reach chrome.runtime, so they
+  // cannot forge an ack.
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (d && typeof d === 'object' && typeof d.__turbo_frame_probe === 'string') {
+      try { chrome.runtime.sendMessage({ action: '__frame_probe_ack', nonce: d.__turbo_frame_probe }); }
+      catch { /* background asleep / context gone — the probe will time out */ }
+    }
+  });
+
   // --- Message router ---
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.action === 'ping') {
@@ -3139,7 +3210,15 @@
       return;
     }
 
+    // Routed frame ops arrive with the target frame already selected by
+    // background; it passes the cumulative offset so our reported coords stay
+    // top-viewport-relative. Stash it for frameCtx (read synchronously at the
+    // top of each handler, before any await, so concurrent messages can't race).
+    const _p = msg.params || {};
+    _injectedFrame = _p.__frameOffset ? { offset: _p.__frameOffset, framePath: _p.__framePath || '' } : null;
+
     const handlers = {
+      __locate_child_frame: (p) => locateChildFrame(p),
       extract_text: (p) => extractText(p),
       find_text: (p) => findText(p),
       inspect: (p) => inspectElement(p),
