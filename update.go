@@ -44,14 +44,37 @@ type updateStatus struct {
 	assetURL  string
 	assetName string
 	sumsURL   string
-	// chromeZipURL is the chrome extension zip download URL from the release.
-	chromeZipURL string
+	// chromeZipURL / firefoxZipURL are the unpacked extension zip download URLs
+	// from the release, used to hot-swap load-unpacked / temporary-add-on
+	// installs per browser flavor.
+	chromeZipURL  string
+	firefoxZipURL string
 
 	// Extension directory info (exported for check_for_updates consumers).
 	// ExtensionDir is the load-unpacked chrome directory found on this host,
 	// ExtensionVersion is its current manifest version.
 	ExtensionDir     string `json:"extensionDir,omitempty"`
 	ExtensionVersion string `json:"extensionVersion,omitempty"`
+
+	// ReleaseNotes is the latest release's body ("what's new"). Agents read
+	// this to learn what changed — new/renamed tools, behavior shifts — so they
+	// can invalidate stale assumptions and memories after an update.
+	ReleaseNotes string `json:"whatsNew,omitempty"`
+}
+
+// maxReleaseNotes caps the release-notes payload so a long changelog can't
+// bloat the tool result; agents get the headline changes, full text is at the
+// release URL.
+const maxReleaseNotes = 4000
+
+// clampReleaseNotes trims surrounding whitespace and caps the length, adding a
+// pointer to the full notes when truncated. Pure (no I/O) so it's unit-tested.
+func clampReleaseNotes(body string) string {
+	body = strings.TrimSpace(body)
+	if len(body) <= maxReleaseNotes {
+		return body
+	}
+	return body[:maxReleaseNotes] + "\n\n…(truncated — see the full release notes at the release URL)"
 }
 
 var (
@@ -135,6 +158,7 @@ func fetchLatestRelease() *updateStatus {
 	var rel struct {
 		TagName string `json:"tag_name"`
 		HTMLURL string `json:"html_url"`
+		Body    string `json:"body"`
 		Assets  []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
@@ -147,6 +171,7 @@ func fetchLatestRelease() *updateStatus {
 
 	st.LatestVersion = strings.TrimPrefix(rel.TagName, "v")
 	st.ReleaseURL = rel.HTMLURL
+	st.ReleaseNotes = clampReleaseNotes(rel.Body)
 	st.UpdateAvailable = st.LatestVersion != "" &&
 		compareVersions(st.LatestVersion, serverVersion) > 0
 
@@ -165,6 +190,8 @@ func fetchLatestRelease() *updateStatus {
 			st.sumsURL = a.URL
 		case "turboweb-mcp-by-ikari-extension-chrome.zip":
 			st.chromeZipURL = a.URL
+		case "turboweb-mcp-by-ikari-extension-firefox.zip":
+			st.firefoxZipURL = a.URL
 		}
 	}
 	if st.UpdateAvailable && st.assetURL == "" {
@@ -245,9 +272,12 @@ type updateResult struct {
 	Updated          bool   `json:"updated"`
 	FromVersion      string `json:"fromVersion"`
 	ToVersion        string `json:"toVersion"`
-	Message          string `json:"message"`
-	ExtensionUpdated bool   `json:"extensionUpdated,omitempty"`
-	ExtensionDir     string `json:"extensionDir,omitempty"`
+	Message           string   `json:"message"`
+	ExtensionUpdated  bool     `json:"extensionUpdated,omitempty"`
+	ExtensionsUpdated []string `json:"extensionsUpdated,omitempty"` // dist dirs swapped (chrome/firefox)
+	// WhatsNew is the new release's notes — surfaced so the agent can re-read
+	// the tool surface and invalidate stale memories right after updating.
+	WhatsNew string `json:"whatsNew,omitempty"`
 }
 
 // performSelfUpdate downloads the latest release binary for this platform,
@@ -331,31 +361,60 @@ func performSelfUpdate() (updateResult, error) {
 	}
 
 	res.Updated = true
+	res.WhatsNew = st.ReleaseNotes
 	res.Message = fmt.Sprintf("updated %s → %s; the daemon respawns from the new binary on the next call, "+
-		"and MCP instances pick it up on next launch", serverVersion, st.LatestVersion)
+		"and MCP instances pick it up on next launch. Read whatsNew and re-check tool descriptions — "+
+		"tools or behavior may have changed; discard stale assumptions.", serverVersion, st.LatestVersion)
 
-	// Extension update: find the loaded-unpacked Chrome extension directory and
-	// overwrite it with the files from the release chrome zip. The new files land
-	// on disk before the reload signal is sent, so Chrome picks up the new version
-	// in the same reload cycle.
-	// Firefox extensions are handled by AMO auto-update (update_url in the signed
-	// manifest) and do not need manual intervention here.
-	if extDir := findChromeExtensionDistDir(); extDir != "" && st.chromeZipURL != "" {
-		extVer := extensionDirVersion(extDir)
-		if compareVersions(st.LatestVersion, extVer) > 0 {
-			if extErr := extractChromeZip(st.chromeZipURL, extDir); extErr != nil {
-				logger.Printf("extension update at %s failed: %v", extDir, extErr)
-				res.Message += fmt.Sprintf("; extension update failed: %v", extErr)
-			} else {
-				res.ExtensionUpdated = true
-				res.ExtensionDir = extDir
-				broadcastExtensionReload(st.LatestVersion)
-				res.Message += fmt.Sprintf("; extension updated at %s — reloading in connected Chromium browsers", extDir)
-			}
+	// Extension update: for EVERY browser flavor we ship an unpacked build for,
+	// overwrite the on-disk load-unpacked / temporary-add-on directory with the
+	// release zip, then broadcast a single reload so each connected browser picks
+	// up the new version (chrome.runtime.reload() re-reads the directory in both
+	// Chrome and Firefox). The files land on disk before the reload signal.
+	// Store/AMO installs aren't in dist/, so they're untouched here and update via
+	// the store / Firefox update_url instead.
+	for _, tgt := range unpackedExtensionTargets(st) {
+		if compareVersions(st.LatestVersion, extensionDirVersion(tgt.dir)) <= 0 {
+			continue // already current
 		}
+		if extErr := extractExtensionZip(tgt.zipURL, tgt.dir, tgt.strip); extErr != nil {
+			logger.Printf("%s extension update at %s failed: %v", tgt.name, tgt.dir, extErr)
+			res.Message += fmt.Sprintf("; %s extension update failed: %v", tgt.name, extErr)
+			continue
+		}
+		res.ExtensionsUpdated = append(res.ExtensionsUpdated, tgt.dir)
+	}
+	if len(res.ExtensionsUpdated) > 0 {
+		res.ExtensionUpdated = true
+		broadcastExtensionReload(st.LatestVersion)
+		res.Message += fmt.Sprintf("; refreshed unpacked extension(s) at %s — reloading connected "+
+			"browsers (load-unpacked Chrome / temporary-add-on Firefox; Store/AMO installs auto-update separately)",
+			strings.Join(res.ExtensionsUpdated, ", "))
 	}
 
 	return res, nil
+}
+
+// extTarget is one hot-swappable unpacked extension: its on-disk dir, the
+// release zip that replaces it, and the path prefix that zip carries.
+type extTarget struct {
+	name, dir, zipURL, strip string
+}
+
+// unpackedExtensionTargets returns the unpacked extension dirs present on this
+// host paired with the matching release zip — one per browser flavor we ship an
+// unpacked build for. Store/AMO installs are NOT here (they live in the
+// browser's own managed storage and auto-update via the store / update_url);
+// only load-unpacked / temporary-add-on installs live under extension/dist/.
+func unpackedExtensionTargets(st *updateStatus) []extTarget {
+	var t []extTarget
+	if dir := findChromeExtensionDistDir(); dir != "" && st.chromeZipURL != "" {
+		t = append(t, extTarget{name: "chrome", dir: dir, zipURL: st.chromeZipURL, strip: "chrome/"})
+	}
+	if dir := findFirefoxExtensionDistDir(); dir != "" && st.firefoxZipURL != "" {
+		t = append(t, extTarget{name: "firefox", dir: dir, zipURL: st.firefoxZipURL, strip: "firefox/"})
+	}
+	return t
 }
 
 // --- Extension update helpers ---
@@ -389,6 +448,23 @@ func findChromeExtensionDistDir() string {
 	return dist
 }
 
+// findFirefoxExtensionDistDir returns the path to the built Firefox extension
+// dist directory (…/extension/dist/firefox), or "" if absent. This is the dir a
+// temporary add-on is loaded from in dev; an AMO-installed extension lives in
+// the profile and is not here (it updates via the manifest update_url).
+func findFirefoxExtensionDistDir() string {
+	src := findExtensionDir()
+	if src == "" {
+		return ""
+	}
+	dist := filepath.Join(src, "dist", "firefox")
+	fi, err := os.Stat(filepath.Join(dist, "manifest.json"))
+	if err != nil || fi.IsDir() {
+		return ""
+	}
+	return dist
+}
+
 // extensionDirVersion reads manifest.json from dir and returns its "version" field.
 func extensionDirVersion(dir string) string {
 	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
@@ -404,10 +480,10 @@ func extensionDirVersion(dir string) string {
 	return m.Version
 }
 
-// extractChromeZip downloads the chrome extension zip from zipURL and extracts
-// it into destDir, stripping the leading "chrome/" path prefix that the
-// Makefile's zip command produces (zip -qr ... chrome/).
-func extractChromeZip(zipURL, destDir string) error {
+// extractExtensionZip downloads an unpacked extension zip from zipURL and
+// extracts it into destDir, stripping the leading path prefix the Makefile's
+// zip command produces (zip -qr ... chrome/ or firefox/).
+func extractExtensionZip(zipURL, destDir, strip string) error {
 	tmp, err := os.CreateTemp("", "turboweb-ext-*.zip")
 	if err != nil {
 		return fmt.Errorf("cannot create temp file: %w", err)
@@ -429,8 +505,8 @@ func extractChromeZip(zipURL, destDir string) error {
 
 	destDir = filepath.Clean(destDir)
 	for _, f := range zr.File {
-		// Strip leading "chrome/" prefix produced by the Makefile.
-		rel := strings.TrimPrefix(filepath.ToSlash(f.Name), "chrome/")
+		// Strip the leading "chrome/" or "firefox/" prefix the Makefile produces.
+		rel := strings.TrimPrefix(filepath.ToSlash(f.Name), strip)
 		if rel == "" || strings.HasSuffix(rel, "/") {
 			continue // directory entry — created implicitly via MkdirAll
 		}
