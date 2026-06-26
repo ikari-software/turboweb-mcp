@@ -164,3 +164,23 @@ func TestExtractChromeZip_ZipSlipRejected(t *testing.T) {
 		t.Error("zip-slip: traversal file was extracted outside dest")
 	}
 }
+
+func TestClampReleaseNotes(t *testing.T) {
+	if got := clampReleaseNotes("  hello  "); got != "hello" {
+		t.Errorf("expected trimmed %q, got %q", "hello", got)
+	}
+	if got := clampReleaseNotes(""); got != "" {
+		t.Errorf("empty should stay empty, got %q", got)
+	}
+	long := strings.Repeat("x", maxReleaseNotes+500)
+	got := clampReleaseNotes(long)
+	if len(got) <= maxReleaseNotes {
+		t.Errorf("over-length notes should keep the cap + suffix, got len %d", len(got))
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", maxReleaseNotes)) {
+		t.Error("clamped notes should preserve the first maxReleaseNotes chars")
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Error("clamped notes should flag truncation")
+	}
+}

@@ -52,6 +52,26 @@ type updateStatus struct {
 	// ExtensionVersion is its current manifest version.
 	ExtensionDir     string `json:"extensionDir,omitempty"`
 	ExtensionVersion string `json:"extensionVersion,omitempty"`
+
+	// ReleaseNotes is the latest release's body ("what's new"). Agents read
+	// this to learn what changed — new/renamed tools, behavior shifts — so they
+	// can invalidate stale assumptions and memories after an update.
+	ReleaseNotes string `json:"whatsNew,omitempty"`
+}
+
+// maxReleaseNotes caps the release-notes payload so a long changelog can't
+// bloat the tool result; agents get the headline changes, full text is at the
+// release URL.
+const maxReleaseNotes = 4000
+
+// clampReleaseNotes trims surrounding whitespace and caps the length, adding a
+// pointer to the full notes when truncated. Pure (no I/O) so it's unit-tested.
+func clampReleaseNotes(body string) string {
+	body = strings.TrimSpace(body)
+	if len(body) <= maxReleaseNotes {
+		return body
+	}
+	return body[:maxReleaseNotes] + "\n\n…(truncated — see the full release notes at the release URL)"
 }
 
 var (
@@ -135,6 +155,7 @@ func fetchLatestRelease() *updateStatus {
 	var rel struct {
 		TagName string `json:"tag_name"`
 		HTMLURL string `json:"html_url"`
+		Body    string `json:"body"`
 		Assets  []struct {
 			Name string `json:"name"`
 			URL  string `json:"browser_download_url"`
@@ -147,6 +168,7 @@ func fetchLatestRelease() *updateStatus {
 
 	st.LatestVersion = strings.TrimPrefix(rel.TagName, "v")
 	st.ReleaseURL = rel.HTMLURL
+	st.ReleaseNotes = clampReleaseNotes(rel.Body)
 	st.UpdateAvailable = st.LatestVersion != "" &&
 		compareVersions(st.LatestVersion, serverVersion) > 0
 
@@ -248,6 +270,9 @@ type updateResult struct {
 	Message          string `json:"message"`
 	ExtensionUpdated bool   `json:"extensionUpdated,omitempty"`
 	ExtensionDir     string `json:"extensionDir,omitempty"`
+	// WhatsNew is the new release's notes — surfaced so the agent can re-read
+	// the tool surface and invalidate stale memories right after updating.
+	WhatsNew string `json:"whatsNew,omitempty"`
 }
 
 // performSelfUpdate downloads the latest release binary for this platform,
@@ -331,8 +356,10 @@ func performSelfUpdate() (updateResult, error) {
 	}
 
 	res.Updated = true
+	res.WhatsNew = st.ReleaseNotes
 	res.Message = fmt.Sprintf("updated %s → %s; the daemon respawns from the new binary on the next call, "+
-		"and MCP instances pick it up on next launch", serverVersion, st.LatestVersion)
+		"and MCP instances pick it up on next launch. Read whatsNew and re-check tool descriptions — "+
+		"tools or behavior may have changed; discard stale assumptions.", serverVersion, st.LatestVersion)
 
 	// Extension update: find the loaded-unpacked Chrome extension directory and
 	// overwrite it with the files from the release chrome zip. The new files land
