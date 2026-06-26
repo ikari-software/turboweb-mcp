@@ -32,8 +32,11 @@ notes are also surfaced to agents via `check_for_updates` / `self_update`
 
 ### Agent ergonomics
 - `check_for_updates` / `self_update` now return **`whatsNew`** (release notes)
-  so agents can learn what changed and invalidate stale memory. `self_update`
-  already swaps in both the binary (MCP) and the Chrome extension in place.
+  so agents can learn what changed and invalidate stale memory.
+- `self_update` swaps in the unpacked extension **in place for every connected
+  browser** — load-unpacked Chrome **and** temporary-add-on Firefox — and
+  reloads each, in addition to replacing the MCP binary. (Chrome Web Store /
+  Firefox AMO installs keep auto-updating via the store / `update_url`.)
 - Tool descriptions and the agent-rules prompt steer toward **selectors over
   coordinates** and document cross-origin frame support.
 

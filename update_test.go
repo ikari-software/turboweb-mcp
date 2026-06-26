@@ -121,8 +121,8 @@ func TestExtractChromeZip(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := extractChromeZip(srv.URL+"/extension.zip", dest); err != nil {
-		t.Fatalf("extractChromeZip: %v", err)
+	if err := extractExtensionZip(srv.URL+"/extension.zip", dest, "chrome/"); err != nil {
+		t.Fatalf("extractExtensionZip: %v", err)
 	}
 
 	// Verify files were extracted with the chrome/ prefix stripped.
@@ -155,7 +155,7 @@ func TestExtractChromeZip_ZipSlipRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := extractChromeZip(srv.URL, dest); err != nil {
+	if err := extractExtensionZip(srv.URL, dest, "chrome/"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// The traversal entry must not have landed outside dest.
@@ -182,5 +182,37 @@ func TestClampReleaseNotes(t *testing.T) {
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Error("clamped notes should flag truncation")
+	}
+}
+
+func TestExtractExtensionZip_FirefoxPrefix(t *testing.T) {
+	dest := t.TempDir()
+
+	// Firefox release zip carries a firefox/ prefix (zip -qr ... firefox).
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range map[string]string{
+		"manifest.json": `{"version":"1.11.0"}`,
+		"background.js":  `console.log("ff")`,
+	} {
+		w, _ := zw.Create("firefox/" + name)
+		_, _ = w.Write([]byte(content))
+	}
+	zw.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	if err := extractExtensionZip(srv.URL, dest, "firefox/"); err != nil {
+		t.Fatalf("extractExtensionZip(firefox): %v", err)
+	}
+	if v := extensionDirVersion(dest); v != "1.11.0" {
+		t.Errorf("firefox manifest version after extraction: got %q, want 1.11.0", v)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "background.js")); err != nil {
+		t.Errorf("expected background.js with firefox/ prefix stripped: %v", err)
 	}
 }
