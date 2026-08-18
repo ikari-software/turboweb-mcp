@@ -414,12 +414,28 @@ async function ensureContentScript(tabId) {
 // frame that owns the document. See resolveFrameId.
 //
 // Only these actions are "frame-local" — they operate on a single document and
-// are safe to route into a child frame. navigate_frame (parent-relative) and
-// list_frames (enumerates the whole tree from the top) deliberately are NOT.
+// are safe to route into a child frame (toContent resolves `frame` → frameId and
+// injects __frameOffset). This is a hand-maintained allowlist: a NEW frame-aware
+// content-script action must be added here, or its `frame` param is silently
+// dropped. toContent warns when that happens (see below) to catch the omission.
+//
+// Deliberately absent:
+//   - navigate_frame / list_frames: parent-relative or whole-tree; see
+//     FRAME_SELF_RESOLVING_ACTIONS.
+//   - cdp_* (cdp_click/cdp_type/cdp_key/cdp_scroll): trusted input is routed via
+//     the Go BiDi path (child browsing contexts), never through here. When BiDi
+//     is absent, the Go bidiOrFallback guard REFUSES cdp_*+frame rather than
+//     letting it reach the extension, so the extension never has to frame-route
+//     them. Keep that guard and this set in agreement.
 const FRAME_LOCAL_ACTIONS = new Set([
   'extract_text', 'find_text', 'inspect', 'get_interactive_map', 'query_elements',
   'click', 'type_text', 'fill_input', 'scroll', 'get_html', 'get_page_structure',
 ]);
+
+// Actions that legitimately receive a `frame` param but resolve it themselves in
+// the content script (parent-relative) instead of via offset routing. Listed so
+// the toContent drop-warning below doesn't false-positive on them.
+const FRAME_SELF_RESOLVING_ACTIONS = new Set(['navigate_frame']);
 
 const FRAME_PROBE_TIMEOUT_MS = 2000;
 // nonce → resolve(childFrameId). A child frame that receives our postMessage
@@ -492,6 +508,12 @@ async function toContent(tabId, action, params = {}, frameId) {
     targetFrame = fid;
     const { frame, ...rest } = params;
     sendParams = { ...rest, __frameOffset: offset, __framePath: params.frame };
+  } else if (frameId == null && params.frame && !FRAME_SELF_RESOLVING_ACTIONS.has(action)) {
+    // A `frame` arrived for an action that neither offset-routes (not in
+    // FRAME_LOCAL_ACTIONS) nor self-resolves it — it will be silently ignored.
+    // Surface it so a newly added frame-aware action that forgot to register in
+    // FRAME_LOCAL_ACTIONS is caught in testing rather than misfiring on the top frame.
+    console.warn(`[turboweb] action "${action}" got a frame param but is not frame-aware; ignoring frame=${params.frame}`);
   }
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tid, { action, params: sendParams }, { frameId: targetFrame }, (response) => {

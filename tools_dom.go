@@ -10,12 +10,15 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// frameOpt is the shared, optional `frame` parameter that scopes a DOM tool to
-// a (same-origin) iframe. It is forwarded verbatim to the extension, which
-// resolves it against the target frame's contentDocument and keeps reported
-// coordinates viewport-relative so a query inside a frame round-trips to a
-// later click. Cross-origin frames are not reachable through the content
-// script — the cdp_* tools pierce those natively.
+// frameOpt is the shared, optional `frame` parameter added to the DOM/synthetic
+// tools that opt in (extract_text, find_text, query_elements, get_interactive_map,
+// inspect, click, type_text, fill_input, scroll, …) — NOT the whole-page tools
+// like describe/page_yaml. It is forwarded verbatim to the extension, whose
+// content script runs in every frame (manifest all_frames:true), so it resolves
+// against BOTH same-origin and cross-origin frames and keeps reported
+// coordinates viewport-relative, so a query inside a frame round-trips to a
+// later click. The cdp_* tools accept the same `frame` for trusted input, routed
+// through BiDi child contexts (see resolveFrameContext).
 func frameOpt() mcp.ToolOption {
 	return mcp.WithString("frame", mcp.Description(
 		"Optional. Scope this call to an iframe. A framePath: a \">\"-separated list of CSS "+
@@ -34,7 +37,7 @@ func registerDomTools(s *server.MCPServer) {
 	addTool(s,
 		mcp.NewTool("list_frames",
 			mcp.WithDescription("Enumerate the frame tree of the page. Returns every <iframe>/<frame> "+
-				"with {frameId, framePath, id, name, src, url, origin, isSameOrigin, rect}. framePath "+
+				"with {framePath, id, name, src, url, origin, isSameOrigin, rect}. framePath "+
 				"(e.g. \"#top_frame > #csframe\") is what you pass as the `frame` argument to other DOM "+
 				"tools to scope them to that frame. Both same-origin and cross-origin frames are "+
 				"reachable by DOM/synthetic tools (the content script runs in every frame); pass the "+

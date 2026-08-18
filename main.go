@@ -98,6 +98,7 @@ For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 func registerAllTools(s *server.MCPServer) {
 	registerBrowserTools(s)
 	registerDomTools(s)
+	registerFrameTools(s)
 	registerFormTools(s)
 	registerInteractionTools(s)
 	registerJsTools(s)
@@ -139,6 +140,12 @@ func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc)
 	}
 	if !slices.Contains(tool.InputSchema.Required, "intent") {
 		tool.InputSchema.Required = append(tool.InputSchema.Required, "intent")
+	}
+	// Tools that declare a `frame` param honor the sticky default frame
+	// (frame_set); non-frame tools are untouched. One chokepoint covers every
+	// frame-aware tool — DOM and cdp_* alike — with no per-tool wiring.
+	if _, hasFrame := tool.InputSchema.Properties["frame"]; hasFrame {
+		handler = injectStickyFrame(handler)
 	}
 	s.AddTool(tool, handler)
 }

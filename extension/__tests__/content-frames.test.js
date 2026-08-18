@@ -18,7 +18,7 @@ beforeAll(() => {
   const fns = [
     'sel', 'resolveRoot', 'deepElementFromPoint', 'listFrames', 'frameSeg',
     'queryElements', 'findText', 'extractText', 'inspectElement',
-    'clickElement', 'getHTML', 'getInteractiveMap',
+    'clickElement', 'getHTML', 'getInteractiveMap', 'getPageStructure',
     'resolveFrameElement', 'navigateFrame', 'locateChildFrame',
   ].join(', ');
   code = code.replace(/\}\)\(\);?\s*$/, `globalThis.__contentAPI = { ${fns} };\n})();`);
@@ -140,7 +140,8 @@ describe('listFrames', () => {
     expect(paths).toContain('#top_frame > #csframe');
     const top = out.frames.find(f => f.framePath === '#top_frame');
     expect(top.isSameOrigin).toBe(true);
-    expect(top.frameId).toBe('#top_frame');
+    // frameId was dropped (it duplicated framePath); framePath is the sole id now.
+    expect(top.frameId).toBeUndefined();
     // nested frame rect is offset into the top viewport (100+10, 50+20)
     const nested = out.frames.find(f => f.framePath === '#top_frame > #csframe');
     expect(nested.rect.x).toBe(110);
@@ -304,5 +305,79 @@ describe('frame probe ack listener', () => {
     chrome.runtime.sendMessage.mockClear();
     window.dispatchEvent(new window.MessageEvent('message', { data: { hello: 'world' } }));
     expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+// --- 46a: coverage gaps for the cross-iframe feature ---
+
+describe('queryElements with a NESTED frame (2-segment offset round-trip)', () => {
+  // The single-level case is covered above; this guards the core invariant that
+  // BOTH frame offsets are summed exactly once. A double-add or a missed
+  // accumulation would pass silently without this.
+  it('accumulates both frame offsets exactly once', () => {
+    const { cdoc } = addFrame(document, document.body, 'top_frame', { fx: 100, fy: 50 });
+    const { cdoc: inner } = addFrame(cdoc, cdoc.body, 'csframe', { fx: 10, fy: 20,
+      innerHTML: '<input id="deep" name="deep">' });
+    const input = inner.getElementById('deep');
+    rect(input, { x: 5, y: 7, width: 60, height: 20 });
+
+    const out = api.queryElements({ selector: '#deep', frame: '#top_frame > #csframe' });
+    expect(out.count).toBe(1);
+    expect(out.frame).toBe('#top_frame > #csframe');
+    // top(100,50) + inner(10,20) + element-local(5,7), each added once.
+    expect(out.elements[0].x).toBe(115);
+    expect(out.elements[0].y).toBe(77);
+  });
+});
+
+describe('getInteractiveMap off-screen culling with frame offset', () => {
+  it('culls a control whose frame offset pushes it below the top viewport', () => {
+    window.innerHeight = 768; window.innerWidth = 1024;
+    // Frame content origin sits far below the fold (y=2000).
+    const { cdoc } = addFrame(document, document.body, 'below', { fx: 0, fy: 2000,
+      innerHTML: '<button id="hidden_btn">Deep</button>' });
+    const btn = cdoc.getElementById('hidden_btn');
+    rect(btn, { x: 0, y: 0, width: 80, height: 30 });
+    const out = api.getInteractiveMap({ frame: '#below' });
+    expect(out.elements.find(e => (e.selector || '').includes('hidden_btn'))).toBeUndefined();
+  });
+
+  it('keeps a control that is on-screen once the frame offset is applied, and offsets its coords', () => {
+    window.innerHeight = 768; window.innerWidth = 1024;
+    const { cdoc } = addFrame(document, document.body, 'vis', { fx: 0, fy: 40,
+      innerHTML: '<button id="vis_btn">See</button>' });
+    const btn = cdoc.getElementById('vis_btn');
+    rect(btn, { x: 0, y: 0, width: 80, height: 30 });
+    const out = api.getInteractiveMap({ frame: '#vis' });
+    const found = out.elements.find(e => (e.selector || '').includes('vis_btn'));
+    expect(found).toBeDefined();
+    // Coordinates carry the frame offset (frame-local 0 + frame origin 40).
+    expect(found.y).toBe(40);
+  });
+});
+
+describe('getPageStructure frame scoping', () => {
+  it('reports the child doc title, emits a frame: key + url line, and scopes to the child body', () => {
+    const { cdoc } = addFrame(document, document.body, 'top_frame', { fx: 0, fy: 0 });
+    // Top document's title is empty; setting the CHILD's title proves scoping
+    // reads fdoc (the frame's document), not the top document.
+    cdoc.title = 'Child Doc';
+    cdoc.body.innerHTML = '<h1 id="h">Inner Heading</h1>';
+    rect(cdoc.getElementById('h'), { x: 0, y: 10, width: 200, height: 30 });
+
+    const out = api.getPageStructure({ frame: '#top_frame' });
+    expect(out.yaml).toContain('frame: "#top_frame"');
+    expect(out.yaml).toContain('title: "Child Doc"');
+    expect(out.yaml).toMatch(/\n\s*url: /);        // reads fdoc.location.href
+    expect(out.yaml).toContain('Inner Heading');   // child body content, scoped in
+  });
+
+  it('culls a child element pushed off-screen by the frame offset (visibleOnly)', () => {
+    window.innerHeight = 768; window.innerWidth = 1024;
+    const { cdoc } = addFrame(document, document.body, 'far', { fx: 0, fy: 5000 });
+    cdoc.body.innerHTML = '<h1 id="deep_h">Below the fold</h1>';
+    rect(cdoc.getElementById('deep_h'), { x: 0, y: 0, width: 200, height: 30 });
+    const out = api.getPageStructure({ frame: '#far' });
+    expect(out.yaml).not.toContain('Below the fold');
   });
 });
