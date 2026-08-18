@@ -556,6 +556,9 @@ func handleNavigate(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	// Otherwise fall back to the content script setting the iframe's src, which
 	// requires a same-origin parent chain.
 	if frameSpec := toString(args["frame"]); frameSpec != "" {
+		// mcp-go v0.44.1 does NOT enforce schema Required at the call layer, so a
+		// missing/empty url still reaches here — guard explicitly rather than
+		// dispatch an empty frame navigation.
 		url := getString(args, "url", "")
 		if url == "" {
 			return mcp.NewToolResultError("navigate: url is required"), nil

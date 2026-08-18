@@ -131,6 +131,8 @@
 
   // Origin of a frame's content viewport within its parent document, including
   // the frame's own border + padding (where the child viewport actually begins).
+  // NOTE: this rect+border+padding formula is mirrored by the inline JS in
+  // bidi_frames.go frameElementInfo (the BiDi/cdp_* path). Keep the two in sync.
   function frameContentOrigin(el) {
     const r = el.getBoundingClientRect();
     const cs = gcs(el);
@@ -138,6 +140,22 @@
       x: r.left + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0),
       y: r.top + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.paddingTop) || 0),
     };
+  }
+
+  // Query a single <iframe>/<frame> element by selector within doc, with
+  // consistent, actionable errors. `where` is an optional context suffix like
+  // ' (within #a > #b)'. Shared by resolveRoot and resolveFrameElement so every
+  // frame lookup validates identically (same invalid-selector / not-found /
+  // not-a-frame messages).
+  function queryFrameEl(doc, segSel, where = '') {
+    let el;
+    try { el = doc.querySelector(segSel); }
+    catch { throw new Error('Invalid frame selector: ' + JSON.stringify(segSel)); }
+    if (!el) throw new Error('Frame not found: ' + segSel + where);
+    if (el.tagName !== 'IFRAME' && el.tagName !== 'FRAME') {
+      throw new Error('Not a frame: ' + segSel + ' resolved to <' + el.tagName.toLowerCase() + '>');
+    }
+    return el;
   }
 
   // Resolve a frame spec to its document + cumulative viewport offset. Returns
@@ -151,14 +169,8 @@
     let doc = document, win = window, offX = 0, offY = 0;
     const parts = [];
     for (const segSel of segments) {
-      let frameEl;
-      try { frameEl = doc.querySelector(segSel); }
-      catch { throw new Error('Invalid frame selector: ' + JSON.stringify(segSel)); }
       const where = parts.length ? ' (within ' + parts.join(' > ') + ')' : '';
-      if (!frameEl) throw new Error('Frame not found: ' + segSel + where);
-      if (frameEl.tagName !== 'IFRAME' && frameEl.tagName !== 'FRAME') {
-        throw new Error('Not a frame: ' + segSel + ' resolved to <' + frameEl.tagName.toLowerCase() + '>');
-      }
+      const frameEl = queryFrameEl(doc, segSel, where);
       const o = frameContentOrigin(frameEl);
       offX += o.x; offY += o.y;
       parts.push(frameSeg(frameEl));
@@ -259,7 +271,6 @@
           else if (el.src) { origin = new URL(el.src, location.href).origin; }
         } catch { /* opaque */ }
         frames.push({
-          frameId: framePath,
           framePath,
           id: el.id || undefined,
           name: (el.getAttribute && el.getAttribute('name')) || undefined,
@@ -287,14 +298,9 @@
     const last = segs[segs.length - 1];
     const parentPath = segs.slice(0, -1).join(' > ');
     const parentDoc = parentPath ? frameCtx(parentPath).root : document;
-    let el;
-    try { el = parentDoc.querySelector(last); }
-    catch { throw new Error('Invalid frame selector: ' + JSON.stringify(last)); }
-    if (!el) throw new Error('Frame not found: ' + last);
-    if (el.tagName !== 'IFRAME' && el.tagName !== 'FRAME') {
-      throw new Error('Not a frame: ' + last + ' resolved to <' + el.tagName.toLowerCase() + '>');
-    }
-    return el;
+    // Same validation and error context as resolveRoot (via the shared helper).
+    const where = parentPath ? ' (within ' + parentPath + ')' : '';
+    return queryFrameEl(parentDoc, last, where);
   }
 
   // --- navigate_frame: navigate ONE frame without replacing the parent ---
@@ -1077,6 +1083,19 @@
       fwin.scrollBy({ left: x || 0, top: y || 0, behavior: 'instant' });
     }
     return { scrollX: Math.round(fwin.scrollX), scrollY: Math.round(fwin.scrollY), frame: ctx.framePath || undefined };
+  }
+
+  // Scroll an element in THIS frame to the viewport center. scrollIntoView walks
+  // scrollable ancestors including parent frames across origins, so this brings a
+  // deeply-nested OOPIF element into the top viewport — a prerequisite for the
+  // coordinate-routed trusted-input path (cdp_* frame), which can only hit
+  // on-screen targets. Used by the background's resolveFrameSelectorCenter.
+  function scrollIntoViewInFrame({ selector, frame } = {}) {
+    const { root: fdoc, framePath } = frameCtx(frame);
+    const el = fdoc.querySelector(selector);
+    if (!el) throw new Error('Element not found: ' + selector);
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    return { ok: true, frame: framePath || undefined };
   }
 
   // --- Get HTML (with depth/length limits) ---
@@ -3233,6 +3252,7 @@
       type_text: (p) => typeText(p),
       fill_input: (p) => fillInput(p),
       scroll: (p) => scrollPage(p),
+      scroll_into_view: (p) => scrollIntoViewInFrame(p),
       get_html: (p) => getHTML(p),
       get_page_structure: (p) => getPageStructure(p),
       execute_js_isolated: (p) => executeJS(p),
