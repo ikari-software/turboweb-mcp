@@ -250,17 +250,13 @@ func bidiOrFallback(action string, bidiHandler server.ToolHandlerFunc) server.To
 		if getBiDi() != nil {
 			return bidiHandler(ctx, req)
 		}
-		// Cross-origin frame targeting only works on the BiDi path (child
-		// browsing contexts). The extension fallback (chrome.debugger on the
-		// top target) would silently ignore `frame` and act on the top frame,
-		// so refuse rather than click/type in the wrong place.
-		if frame := toString(req.GetArguments()["frame"]); frame != "" {
-			return mcp.NewToolResultError(fmt.Sprintf(
-				"%s with frame=%q requires WebDriver BiDi (not connected). The extension "+
-					"fallback cannot target a child frame's browsing context. Launch with BiDi, "+
-					"or for SAME-ORIGIN frames use click/type_text/scroll with the frame param.",
-				action, frame)), nil
-		}
+		// No BiDi: fall back to the extension. Frame targeting is handled there:
+		// on Chrome the cdp_* handlers resolve the element inside the frame via
+		// the all_frames content script and route trusted input to the OOPIF
+		// (Chrome's cross-process input router); on Firefox (no chrome.debugger)
+		// ensureDebugger returns an actionable "connect BiDi" error. Either way
+		// the extension is the single source of truth for the frame capability,
+		// so we no longer refuse here.
 		return extensionHandler(ctx, req)
 	}
 }

@@ -13,34 +13,40 @@ func reqWith(args map[string]any) mcp.CallToolRequest {
 	return mcp.CallToolRequest{Params: mcp.CallToolParams{Arguments: args}}
 }
 
-// --- bidiOrFallback frame guard (46a) ---
+// --- bidiOrFallback frame routing (46a + turboweb-f34) ---
 //
-// cross-origin `frame` targeting only works on the BiDi path. Without BiDi the
-// extension fallback would silently act on the TOP frame, so the guard must
-// refuse cdp_*+frame rather than click/type in the wrong place.
+// With BiDi, frame targeting uses the BiDi child-context path. Without BiDi, the
+// call now passes THROUGH to the extension, which handles the frame itself: on
+// Chrome the cdp_* handlers resolve the element in the frame (all_frames content
+// script) and route trusted input to the OOPIF; on Firefox ensureDebugger
+// returns an actionable error. So the Go layer no longer refuses cdp_*+frame.
 
-func TestBidiOrFallback_FrameGuardRefusesWithoutBiDi(t *testing.T) {
+func TestBidiOrFallback_FramePassesThroughToExtensionWithoutBiDi(t *testing.T) {
 	setBiDi(nil)
 	ranBiDi := false
-	h := bidiOrFallback("cdp_click", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		ranBiDi = true
-		return textResult("bidi")
+	withMockBrowser(t, echoHandler, func() {
+		h := bidiOrFallback("cdp_click", func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			ranBiDi = true
+			return textResult("bidi")
+		})
+		res, err := h(context.Background(), reqWith(map[string]any{
+			"frame": "#cross", "selector": "#field",
+		}))
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if ranBiDi {
+			t.Fatal("BiDi handler must not run when BiDi is disconnected")
+		}
+		// The frame call is forwarded to the extension (echoed action), not
+		// refused at the Go layer.
+		if txt := extractText(t, res); !strings.Contains(txt, "cdp_click") {
+			t.Errorf("cdp_click+frame should pass through to the extension, got: %q", txt)
+		}
+		if txt := extractText(t, res); !strings.Contains(txt, "#cross") {
+			t.Errorf("the frame selector should be forwarded to the extension, got: %q", txt)
+		}
 	})
-	res, err := h(context.Background(), reqWith(map[string]any{
-		"frame": "#cross", "x": float64(10), "y": float64(20),
-	}))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if ranBiDi {
-		t.Fatal("BiDi handler must not run when BiDi is disconnected")
-	}
-	if !res.IsError {
-		t.Fatal("expected an error result for cdp_* + frame without BiDi")
-	}
-	if txt := extractText(t, res); !strings.Contains(txt, "requires WebDriver BiDi") {
-		t.Errorf("error should explain the BiDi requirement, got: %q", txt)
-	}
 }
 
 func TestBidiOrFallback_RoutesToBiDiWhenConnected(t *testing.T) {

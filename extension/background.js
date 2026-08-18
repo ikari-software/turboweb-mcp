@@ -429,7 +429,7 @@ async function ensureContentScript(tabId) {
 //     them. Keep that guard and this set in agreement.
 const FRAME_LOCAL_ACTIONS = new Set([
   'extract_text', 'find_text', 'inspect', 'get_interactive_map', 'query_elements',
-  'click', 'type_text', 'fill_input', 'scroll', 'get_html', 'get_page_structure',
+  'click', 'type_text', 'fill_input', 'scroll', 'scroll_into_view', 'get_html', 'get_page_structure',
 ]);
 
 // Actions that legitimately receive a `frame` param but resolve it themselves in
@@ -723,14 +723,44 @@ async function cdpResolveSelectorCenter(tid, selector) {
   return { cx: v.cx, cy: v.cy };
 }
 
-async function cdpClick(tabId, x, y, shift = false, selector = null, clickCount = 1) {
+// resolveFrameSelectorCenter resolves a selector INSIDE a frame (same- OR
+// cross-origin) to its center in TOP-viewport coordinates, reusing the
+// all_frames query path (query_elements applies the cumulative frame offset).
+// This is how trusted CDP input reaches OOPIF elements on Chrome without BiDi:
+// Runtime.evaluate on the top target can't see into an OOPIF, but the content
+// script running INSIDE the frame can, and Chrome's cross-process input router
+// delivers a top-viewport-coordinate Input event to the OOPIF's widget.
+async function resolveFrameSelectorCenter(tabId, selector, framePath) {
+  // Coordinate-routed input can only hit on-screen targets, so bring the element
+  // into the top viewport FIRST — scrollIntoView in the frame walks cross-origin
+  // ancestor frames too. Best-effort: if the element is missing, query_elements
+  // below raises the authoritative error. Then re-resolve: the frame offset is
+  // recomputed per routed call, so the coordinates reflect the settled scroll.
+  try {
+    await toContent(tabId, 'scroll_into_view', { selector, frame: framePath });
+    await new Promise((r) => setTimeout(r, 150)); // let cross-origin ancestor scroll settle
+  } catch (_) { /* fall through to the query_elements error */ }
+  const q = await toContent(tabId, 'query_elements', { selector, frame: framePath, limit: 1 });
+  const el = q && q.elements && q.elements[0];
+  if (!el) throw new Error(`No element matches selector ${JSON.stringify(selector)} in frame "${framePath}"`);
+  return { cx: el.x + el.w / 2, cy: el.y + el.h / 2 };
+}
+
+async function cdpClick(tabId, x, y, shift = false, selector = null, clickCount = 1, frame = null) {
   const tid = await ensureDebugger(tabId);
   let cx = x, cy = y;
-  if (selector) {
+  if (frame && selector) {
+    // Cross/same-origin frame: resolve the element to top-viewport coords via
+    // the frame's content script, then dispatch on the top target — the browser
+    // input router hit-tests and routes to the OOPIF (and focuses it).
+    ({ cx, cy } = await resolveFrameSelectorCenter(tabId, selector, frame));
+  } else if (selector) {
     ({ cx, cy } = await cdpResolveSelectorCenter(tid, selector));
   } else if (typeof cx !== 'number' || typeof cy !== 'number') {
     throw new Error('cdp_click: provide either selector or x,y coordinates');
   }
+  // With a frame + explicit x,y, coordinates are already top-viewport-relative
+  // (the tool contract), so they route to the OOPIF unchanged.
   const modifiers = shift ? CDP_MOD_SHIFT : 0;
   const count = Math.max(1, Math.min(3, clickCount | 0));
   // CDP detects double/triple-click from the clickCount on consecutive
@@ -743,6 +773,7 @@ async function cdpClick(tabId, x, y, shift = false, selector = null, clickCount 
   }
   const out = { clicked: true, x: cx, y: cy, shift: !!shift, clickCount: count };
   if (selector) out.selector = selector;
+  if (frame) out.frame = frame;
   return out;
 }
 
@@ -794,12 +825,39 @@ function humanGapMs(ch, wpm) {
   return Math.min(1500, Math.max(20, gap));
 }
 
-async function cdpType(tabId, text = '', selector = null, clear = false, wpm) {
+async function cdpType(tabId, text = '', selector = null, clear = false, wpm, frame = null) {
   const tid = await ensureDebugger(tabId);
   // Humanized cadence is ON by default; wpm=0 means instant machine-speed.
   if (wpm === undefined || wpm === null) wpm = DEFAULT_TYPE_WPM;
   const humanize = wpm > 0;
-  if (selector) {
+  let frameCleared = false;
+  if (frame && selector) {
+    // Runtime.evaluate on the top target can't focus an element inside an
+    // OOPIF. Instead resolve the element to top-viewport coords via the frame's
+    // content script and dispatch real mouse input on it — Chrome's input router
+    // routes to the OOPIF and focuses the field, so the key events below (on the
+    // top target) follow focus into the frame. Reaches same-origin frames too.
+    const { cx, cy } = await resolveFrameSelectorCenter(tabId, selector, frame);
+    if (clear) {
+      // Select-all via TRIPLE-CLICK (a real mouse event that routes to the
+      // OOPIF) rather than the Meta/Ctrl+A chord — the select-all editing
+      // command does NOT reliably cross the process boundary into an OOPIF, so
+      // the chord would leave the field's text unselected. Triple-click selects
+      // all text in a single-line input; a trusted Backspace then deletes it.
+      for (let n = 1; n <= 3; n++) {
+        await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: n });
+        await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: n });
+      }
+      await cdpDispatchKey(tid, 'Backspace');
+      frameCleared = true;
+    } else {
+      await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: cx, y: cy, button: 'left', clickCount: 1 });
+      await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: cx, y: cy, button: 'left', clickCount: 1 });
+    }
+  } else if (frame && !selector) {
+    // No selector: assume focus is already inside the frame (e.g. a prior
+    // cdp_click frame=…). Keys follow the current focus to the OOPIF widget.
+  } else if (selector) {
     // Focus the element first so subsequent key events route to it. We
     // verify activeElement actually moved — some elements refuse focus
     // (disabled inputs, contenteditable=false, etc.) and silently
@@ -818,7 +876,10 @@ async function cdpType(tabId, text = '', selector = null, clear = false, wpm) {
       throw new Error(`focus on ${JSON.stringify(selector)} did not take effect (element refused focus?)`);
     }
   }
-  if (clear) await cdpSelectAllDelete(tid);
+  // Non-frame paths (and frame-without-selector) clear via the Meta/Ctrl+A
+  // chord, which works when focus is in the top document. The frame+selector
+  // path already cleared via triple-click above (frameCleared).
+  if (clear && !frameCleared) await cdpSelectAllDelete(tid);
   const chars = [...String(text)];
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
@@ -829,21 +890,30 @@ async function cdpType(tabId, text = '', selector = null, clear = false, wpm) {
   }
   const out = { typed: chars.length, cleared: !!clear, wpm: humanize ? wpm : 0 };
   if (selector) out.selector = selector;
+  if (frame) out.frame = frame;
   return out;
 }
 
-async function cdpKey(tabId, key, modifiers = []) {
+async function cdpKey(tabId, key, modifiers = [], frame = null) {
   const tid = await ensureDebugger(tabId);
+  // Key events follow focus. `frame` is advisory here: after a cdp_click/cdp_type
+  // into a frame the OOPIF widget is focused, so a shortcut dispatched on the top
+  // target routes there. (There is no per-key coordinate to translate.)
   await cdpDispatchKey(tid, key, Array.isArray(modifiers) ? modifiers : []);
   const out = { pressed: key };
   if (modifiers && modifiers.length) out.modifiers = modifiers;
+  if (frame) out.frame = frame;
   return out;
 }
 
-async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600, selector = null) {
+async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600, selector = null, frame = null) {
   const tid = await ensureDebugger(tabId);
   let cx = x, cy = y;
-  if (selector) {
+  if (frame && selector) {
+    // Resolve the target inside the frame to top-viewport coords; the wheel event
+    // routes to the OOPIF like a click does.
+    ({ cx, cy } = await resolveFrameSelectorCenter(tabId, selector, frame));
+  } else if (selector) {
     // Wheel events dispatch *at* a point and bubble up to the nearest
     // scrollable ancestor — that's how you scroll inner containers
     // (dropdowns, virtualised lists) that window.scrollBy can't reach.
@@ -852,6 +922,7 @@ async function cdpScroll(tabId, x = 600, y = 400, deltaX = 0, deltaY = 600, sele
   await cdpSend(tid, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x: cx, y: cy, deltaX, deltaY });
   const out = { scrolled: true, x: cx, y: cy };
   if (selector) out.selector = selector;
+  if (frame) out.frame = frame;
   return out;
 }
 
@@ -1243,13 +1314,13 @@ async function dispatch(action, params) {
 
     // --- CDP real-input commands (extension fallback path) ---
     case 'cdp_click':
-      return await cdpClick(params.tabId, params.x, params.y, params.shift, params.selector, params.clickCount);
+      return await cdpClick(params.tabId, params.x, params.y, params.shift, params.selector, params.clickCount, params.frame);
     case 'cdp_type':
-      return await cdpType(params.tabId, params.text, params.selector, params.clear, params.wpm);
+      return await cdpType(params.tabId, params.text, params.selector, params.clear, params.wpm, params.frame);
     case 'cdp_key':
-      return await cdpKey(params.tabId, params.key, params.modifiers);
+      return await cdpKey(params.tabId, params.key, params.modifiers, params.frame);
     case 'cdp_scroll':
-      return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY, params.selector);
+      return await cdpScroll(params.tabId, params.x, params.y, params.deltaX, params.deltaY, params.selector, params.frame);
 
     case 'set_input_files':
       return await setInputFiles(params.tabId, params.selector, params.files);

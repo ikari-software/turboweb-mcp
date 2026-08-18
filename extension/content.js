@@ -1085,6 +1085,19 @@
     return { scrollX: Math.round(fwin.scrollX), scrollY: Math.round(fwin.scrollY), frame: ctx.framePath || undefined };
   }
 
+  // Scroll an element in THIS frame to the viewport center. scrollIntoView walks
+  // scrollable ancestors including parent frames across origins, so this brings a
+  // deeply-nested OOPIF element into the top viewport — a prerequisite for the
+  // coordinate-routed trusted-input path (cdp_* frame), which can only hit
+  // on-screen targets. Used by the background's resolveFrameSelectorCenter.
+  function scrollIntoViewInFrame({ selector, frame } = {}) {
+    const { root: fdoc, framePath } = frameCtx(frame);
+    const el = fdoc.querySelector(selector);
+    if (!el) throw new Error('Element not found: ' + selector);
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    return { ok: true, frame: framePath || undefined };
+  }
+
   // --- Get HTML (with depth/length limits) ---
   function getHTML({ selector, outer = false, maxDepth = 0, maxLength = 200000, frame }) {
     const { root: fdoc, framePath } = frameCtx(frame);
@@ -3239,6 +3252,7 @@
       type_text: (p) => typeText(p),
       fill_input: (p) => fillInput(p),
       scroll: (p) => scrollPage(p),
+      scroll_into_view: (p) => scrollIntoViewInFrame(p),
       get_html: (p) => getHTML(p),
       get_page_structure: (p) => getPageStructure(p),
       execute_js_isolated: (p) => executeJS(p),
