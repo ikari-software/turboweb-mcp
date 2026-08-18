@@ -144,7 +144,10 @@ func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc)
 	// Tools that declare a `frame` param honor the sticky default frame
 	// (frame_set); non-frame tools are untouched. One chokepoint covers every
 	// frame-aware tool — DOM and cdp_* alike — with no per-tool wiring.
-	if _, hasFrame := tool.InputSchema.Properties["frame"]; hasFrame {
+	// `navigate` is excluded: there `frame` means "navigate THIS frame", a
+	// deliberate per-call target, so silently inheriting a sticky frame would
+	// turn a full-page navigation into a frame-only one.
+	if _, hasFrame := tool.InputSchema.Properties["frame"]; hasFrame && tool.Name != "navigate" {
 		handler = injectStickyFrame(handler)
 	}
 	s.AddTool(tool, handler)

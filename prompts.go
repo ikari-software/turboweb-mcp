@@ -88,7 +88,13 @@ toast. Bypassing them with execute_js leaves the user blind.
   fill_input, scroll) reach cross-origin embeds — pass the frame argument
   with the framePath. Discover frames and their framePaths with list_frames.
 - Address frames by selector, never by coordinates. cdp_* tools also accept
-  a frame argument for trusted input into a frame.
+  a frame argument for trusted input into a frame — this works on Chrome even
+  WITHOUT BiDi (input is routed to the cross-origin OOPIF), and via BiDi on
+  Firefox/Zen.
+- For a multi-step flow inside one frame, call frame_set(framePath) once so
+  every subsequent frame-aware call inherits it (a per-call frame still wins);
+  frame_context reports the current sticky frame, and frame_set with no frame
+  clears it back to the top.
 
 # Replacing a field's value
 

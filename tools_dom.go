@@ -12,8 +12,8 @@ import (
 
 // frameOpt is the shared, optional `frame` parameter added to the DOM/synthetic
 // tools that opt in (extract_text, find_text, query_elements, get_interactive_map,
-// inspect, click, type_text, fill_input, scroll, …) — NOT the whole-page tools
-// like describe/page_yaml. It is forwarded verbatim to the extension, whose
+// inspect, page_yaml, click, type_text, fill_input, scroll, …) — but NOT the
+// Haiku-summarizing whole-page `describe`. It is forwarded verbatim to the extension, whose
 // content script runs in every frame (manifest all_frames:true), so it resolves
 // against BOTH same-origin and cross-origin frames and keeps reported
 // coordinates viewport-relative, so a query inside a frame round-trips to a
@@ -28,7 +28,9 @@ func frameOpt() mcp.ToolOption {
 			"frame, so DOM reads and synthetic interaction (extract_text, find_text, query_elements, "+
 			"click, type_text, fill_input, scroll, etc.) reach cross-origin embeds too. Frames are "+
 			"addressed by SELECTOR, not coordinates: a framePath must be a chain of CSS selectors. "+
-			"Coordinates stay top-viewport-relative in the result either way.",
+			"Coordinates stay top-viewport-relative in the result either way. For a multi-step flow "+
+			"inside one frame, call frame_set once instead of repeating this arg (a per-call frame "+
+			"still overrides the sticky default).",
 	))
 }
 
@@ -41,7 +43,9 @@ func registerDomTools(s *server.MCPServer) {
 				"(e.g. \"#top_frame > #csframe\") is what you pass as the `frame` argument to other DOM "+
 				"tools to scope them to that frame. Both same-origin and cross-origin frames are "+
 				"reachable by DOM/synthetic tools (the content script runs in every frame); pass the "+
-				"framePath as the `frame` argument. The cdp_* tools also accept `frame` for trusted input."),
+				"framePath as the `frame` argument. The cdp_* tools also accept `frame` for trusted input "+
+				"(on Chrome this works without BiDi). Set frame_set(framePath) to make one frame the sticky "+
+				"default for a multi-step flow."),
 			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
 		),
 		handleListFrames,

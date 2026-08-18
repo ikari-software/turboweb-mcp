@@ -95,6 +95,21 @@ func TestBidiOrFallback_FallsBackToExtensionWhenNoFrame(t *testing.T) {
 // needs a real socket — so it is left to integration, matching the rest of the
 // suite which does not mock the BiDi transport.)
 
+// mcp-go v0.44.1 does not enforce schema Required at the call layer, so the
+// frame path must guard an empty url itself rather than dispatch an empty nav.
+func TestHandleNavigate_FrameEmptyURLErrors(t *testing.T) {
+	setBiDi(nil)
+	withMockBrowser(t, echoHandler, func() {
+		res, err := handleNavigate(context.Background(), reqWith(map[string]any{"frame": "#f"}))
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if !res.IsError || !strings.Contains(extractText(t, res), "url is required") {
+			t.Errorf("empty url on the frame path should error, got: %q", extractText(t, res))
+		}
+	})
+}
+
 func TestHandleNavigate_NoFrameRoutesToNavigate(t *testing.T) {
 	setBiDi(nil)
 	withMockBrowser(t, echoHandler, func() {
@@ -125,6 +140,9 @@ func TestHandleNavigate_FrameFallbackRoutesToNavigateFrame(t *testing.T) {
 		}
 		if !strings.Contains(txt, "#top_frame") {
 			t.Errorf("the frame selector should be forwarded to the extension, got: %q", txt)
+		}
+		if !strings.Contains(txt, "https://example.com/inner") {
+			t.Errorf("the url should be forwarded to the extension, got: %q", txt)
 		}
 	})
 }

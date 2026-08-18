@@ -739,10 +739,20 @@ async function resolveFrameSelectorCenter(tabId, selector, framePath) {
   try {
     await toContent(tabId, 'scroll_into_view', { selector, frame: framePath });
     await new Promise((r) => setTimeout(r, 150)); // let cross-origin ancestor scroll settle
-  } catch (_) { /* fall through to the query_elements error */ }
+  } catch (e) {
+    // A missing element is surfaced authoritatively by query_elements below; any
+    // OTHER failure (frame probe timeout, sandboxed frame, resolution error)
+    // means we can't trust the coordinates — propagate rather than dispatch blind.
+    if (!/not found|No element/i.test(String((e && e.message) || e))) throw e;
+  }
   const q = await toContent(tabId, 'query_elements', { selector, frame: framePath, limit: 1 });
   const el = q && q.elements && q.elements[0];
   if (!el) throw new Error(`No element matches selector ${JSON.stringify(selector)} in frame "${framePath}"`);
+  // Mirror cdpResolveSelectorCenter: refuse a zero-size target rather than
+  // dispatching trusted input at a degenerate point.
+  if ((el.w || 0) < 1 && (el.h || 0) < 1) {
+    throw new Error(`Element ${JSON.stringify(selector)} in frame "${framePath}" has a zero-size bounding box`);
+  }
   return { cx: el.x + el.w / 2, cy: el.y + el.h / 2 };
 }
 
@@ -857,6 +867,12 @@ async function cdpType(tabId, text = '', selector = null, clear = false, wpm, fr
   } else if (frame && !selector) {
     // No selector: assume focus is already inside the frame (e.g. a prior
     // cdp_click frame=…). Keys follow the current focus to the OOPIF widget.
+    // clear=true here is unsupported: without a selector we can't triple-click to
+    // select-all, and the Meta/Ctrl+A chord does NOT cross the OOPIF boundary, so
+    // it would silently no-op. Refuse rather than report a clear that didn't happen.
+    if (clear) {
+      throw new Error('cdp_type: clear=true inside a frame requires a selector — the Ctrl/Cmd+A select-all chord does not cross the OOPIF process boundary, so a selector is needed to triple-click select-all.');
+    }
   } else if (selector) {
     // Focus the element first so subsequent key events route to it. We
     // verify activeElement actually moved — some elements refuse focus
