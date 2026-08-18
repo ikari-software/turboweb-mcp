@@ -4,6 +4,41 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## 1.12.0
+
+### Trusted input into cross-origin frames on Chrome (no BiDi)
+- **`cdp_click` / `cdp_type` / `cdp_key` / `cdp_scroll` now reach same- AND
+  cross-origin frames on Chrome without BiDi** (previously BiDi/Firefox only).
+  The element is resolved inside the frame via the `all_frames` content script
+  and trusted input is dispatched on the top target, so Chrome's cross-process
+  input router delivers it to the OOPIF. Keys follow focus (`cdp_type` clicks the
+  field first); `clear=true` selects all via **triple-click** (the Meta/Ctrl+A
+  chord does not cross the OOPIF process boundary); off-screen frame targets are
+  **scrolled into view** first (across cross-origin ancestors). Live-validated
+  same-origin, single-hop, and two-hop cross-origin.
+
+### Sticky frame context
+- **`frame_set(framePath)` / `frame_context`** — scope every subsequent
+  frame-aware call (DOM reads and `cdp_*`) to one frame until cleared, instead of
+  repeating the `frame` arg. Injected at the `addTool` chokepoint (a per-call
+  `frame` still wins); `navigate` is excluded on purpose.
+
+### Cross-origin frame targeting hardening
+- `resolveFrameContext` now maps an iframe to its BiDi child browsing context by
+  **unique URL → unique origin → count-gated document-order index**, and **errors
+  loudly** on ambiguity instead of silently dispatching trusted input into the
+  wrong cross-origin frame.
+
+### Maintainability, tests, and fixes
+- Cross-iframe cleanups (shared `queryFrameEl` validator, reciprocal cross-file
+  offset comments, dropped redundant `frameId`), and expanded frame test coverage.
+- Fixes from a multi-agent code review: restored the `navigate` empty-`url` guard
+  (mcp-go does not enforce `Required` at the call layer), excluded `navigate`
+  from sticky-frame injection, refused `cdp_type clear` in a frame without a
+  selector, and stopped swallowing non-"not found" scroll failures.
+- Agent guidance now documents `frame_set`/`frame_context` and the no-BiDi
+  cross-origin `cdp_*` capability.
+
 ## 1.11.0
 
 ### Cross-origin frames
