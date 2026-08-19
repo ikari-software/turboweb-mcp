@@ -424,19 +424,12 @@ func unpackedExtensionTargets(st *updateStatus) []extTarget {
 // (browser.go), which locates the extension source directory, and appends
 // the dist/chrome suffix.
 //
-// $TURBOWEB_EXTENSION_DIR is a strict override: if set and the directory
-// does not contain a manifest.json, "" is returned rather than falling back
-// to auto-detection (an explicit override that doesn't resolve is a
-// configuration error, not a hint to try elsewhere).
+// The extension source root is resolved by findExtensionDir (browser.go), which
+// honors the $TURBOWEB_EXTENSION_DIR override; dist/chrome derives from it. This
+// keeps a single source of truth so the same override also covers the Firefox
+// dist dir below (previously the env var only fed the Chrome path).
 func findChromeExtensionDistDir() string {
-	if dir := os.Getenv("TURBOWEB_EXTENSION_DIR"); dir != "" {
-		fi, err := os.Stat(filepath.Join(dir, "manifest.json"))
-		if err == nil && !fi.IsDir() {
-			return dir
-		}
-		return "" // env var set but invalid — don't fall through to auto-detect
-	}
-	src := findExtensionDir() // from browser.go: finds extension/ source dir
+	src := findExtensionDir()
 	if src == "" {
 		return ""
 	}
