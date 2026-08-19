@@ -71,22 +71,49 @@ func TestExtensionDirVersion(t *testing.T) {
 	}
 }
 
-func TestFindChromeExtensionDistDir_EnvOverride(t *testing.T) {
-	dir := t.TempDir()
+// TURBOWEB_EXTENSION_DIR points at the extension SOURCE root (the dir with
+// manifest.json holding dist/chrome and dist/firefox); the SAME override must
+// resolve BOTH browsers' dist dirs so self_update can hot-swap either from an
+// installed binary.
+func TestExtensionDistDirs_EnvOverride(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TURBOWEB_EXTENSION_DIR", root)
 
-	// Env var pointing at a non-extension directory → not found
-	t.Setenv("TURBOWEB_EXTENSION_DIR", dir)
+	// Env set but not a valid extension source root (no manifest) → both empty (strict).
 	if got := findChromeExtensionDistDir(); got != "" {
-		t.Errorf("no manifest in dir: got %q, want empty", got)
+		t.Errorf("no source manifest: chrome got %q, want empty", got)
+	}
+	if got := findFirefoxExtensionDistDir(); got != "" {
+		t.Errorf("no source manifest: firefox got %q, want empty", got)
 	}
 
-	// Env var pointing at a valid extension directory → returned as-is
-	if err := os.WriteFile(filepath.Join(dir, "manifest.json"),
+	// Mark the env dir as an extension source root.
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"),
 		[]byte(`{"version":"9.9.9"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := findChromeExtensionDistDir(); got != dir {
-		t.Errorf("got %q, want %q", got, dir)
+	// Source root but no built dist dirs yet → still empty.
+	if got := findChromeExtensionDistDir(); got != "" {
+		t.Errorf("no dist/chrome: got %q, want empty", got)
+	}
+
+	// Build both dist dirs → the one override now resolves BOTH browsers.
+	chromeDist := filepath.Join(root, "dist", "chrome")
+	fxDist := filepath.Join(root, "dist", "firefox")
+	for _, d := range []string{chromeDist, fxDist} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "manifest.json"),
+			[]byte(`{"version":"1.2.3"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := findChromeExtensionDistDir(); got != chromeDist {
+		t.Errorf("chrome: got %q, want %q", got, chromeDist)
+	}
+	if got := findFirefoxExtensionDistDir(); got != fxDist {
+		t.Errorf("firefox: got %q, want %q", got, fxDist)
 	}
 }
 

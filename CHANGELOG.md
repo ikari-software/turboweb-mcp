@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## 1.12.1
+
+### `self_update` extension hot-swap from an installed binary
+- Fixed `self_update` not reloading the loaded browser extension when the server
+  runs from an install location away from the repo (e.g. `/opt/homebrew/bin`): it
+  couldn't locate the unpacked extension dir to swap. **`TURBOWEB_EXTENSION_DIR`
+  now points at the extension SOURCE root** (the dir holding `dist/chrome` and
+  `dist/firefox`) and is honored in `findExtensionDir`, so the one override
+  resolves **both** the Chrome/Arc and Firefox dist dirs — previously it fed only
+  the Chrome path. Set it in the MCP server env and load the unpacked extension
+  from that root's `dist/<browser>` to have every connected browser hot-swap on
+  update.
+
 ## 1.12.0
 
 ### Trusted input into cross-origin frames on Chrome (no BiDi)

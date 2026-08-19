@@ -241,6 +241,19 @@ func findChrome() string {
 
 // findExtensionDir locates the extension directory relative to the binary.
 func findExtensionDir() string {
+	// Explicit override: the extension SOURCE root (the dir with manifest.json,
+	// holding dist/chrome and dist/firefox). Set this when the binary is
+	// installed away from the repo (e.g. /opt/homebrew/bin) so launch_browser
+	// AND self_update can still locate the unpacked extension — both Chrome/Arc
+	// and Firefox dist dirs derive from this one path. Strict: set-but-invalid
+	// returns "" rather than falling through to auto-detect (an override that
+	// doesn't resolve is a configuration error, not a hint to try elsewhere).
+	if env := os.Getenv("TURBOWEB_EXTENSION_DIR"); env != "" {
+		if fi, err := os.Stat(filepath.Join(env, "manifest.json")); err == nil && !fi.IsDir() {
+			return env
+		}
+		return ""
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return ""
