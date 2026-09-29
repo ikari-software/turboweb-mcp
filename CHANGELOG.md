@@ -4,31 +4,6 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
-## Unreleased
-
-### Agents introduce themselves (`introduce` tool) + fixed host detection
-- New **`introduce`** tool: agents call it once with `name` (and optional
-  `model` / `host` / `task`) so the popup, cursor badge and toasts show who is
-  driving. Server instructions ask agents to call it before their first action.
-- Host detection rewritten: walks the process tree past wrappers (`node`, `npx`,
-  Claude Desktop's `disclaimer`, shells), matches exact executables / `.app`
-  bundles, and no longer maps any name containing "code" (jcode, opencode, ...)
-  to VS Code. MCP `clientInfo` from initialize wins over the process guess, and
-  unknown client names are shown as-is. Recognises Claude Code, Claude Desktop,
-  Cursor, VS Code, Windsurf, Zed, jcode, Codex, Gemini CLI, opencode, Cline,
-  Roo Code, Goose, Kiro, and more.
-- Relay instances now **re-register** with the daemon after initialize and after
-  `introduce`, so identity learned post-connect reaches the popup (previously the
-  pre-handshake guess stuck forever).
-- Labels are now `Claude · my-project` instead of `claude-code/my-project#4242`.
-  `MCP_CLIENT_LABEL` still overrides. New `MCP_CLIENT_TYPE` overrides the host.
-- Popup agent rows show the host chip by display name plus a model / task
-  sub-line. Hover a row for full identity details.
-- **Tools refuse to run until `introduce` is called**, just like a missing
-  `intent`. The refusal tells the model exactly what to call and to retry.
-  Exempt: `introduce`, `connection_status`, `check_for_updates`, `self_update`.
-  Set `TURBOWEB_REQUIRE_INTRODUCE=0` to disable for hosts/scripts that can't comply.
-
 ## 1.12.1
 
 ### `self_update` extension hot-swap from an installed binary
