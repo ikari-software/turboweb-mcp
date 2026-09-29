@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.13.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.12.1...v1.13.0) (2026-09-29)
+
+
+### Features
+
+* agents introduce themselves; fix host detection and popup labels ([#28](https://github.com/ikari-software/turboweb-mcp/issues/28)) ([de93696](https://github.com/ikari-software/turboweb-mcp/commit/de93696f0fd014ceadc8f03a815480e870bb366a))
+
 ## 1.12.1
 
 ### `self_update` extension hot-swap from an installed binary
