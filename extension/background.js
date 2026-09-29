@@ -268,10 +268,14 @@ function connect() {
     const intent = typeof params._intent === 'string' ? params._intent : '';
     const clientLabel = typeof params._clientLabel === 'string' ? params._clientLabel : '';
     const clientType = typeof params._clientType === 'string' ? params._clientType : '';
+    // Short "who" name (self-introduced agent name or host display name).
+    // Older servers don't send it; consumers fall back to clientLabel.
+    const clientName = typeof params._clientName === 'string' ? params._clientName : '';
     const clientHue = typeof params._clientHue === 'number' ? params._clientHue : 40;
     delete params._intent;
     delete params._clientLabel;
     delete params._clientType;
+    delete params._clientName;
     delete params._clientHue;
 
     const start = performance.now();
@@ -282,6 +286,7 @@ function connect() {
       intent,
       clientLabel,
       clientType,
+      clientName,
       clientHue,
       params: summariseParams(msg.action, params),
     };
@@ -294,6 +299,7 @@ function connect() {
       intent,
       clientLabel,
       clientType,
+      clientName,
       clientHue,
       params,
     });
