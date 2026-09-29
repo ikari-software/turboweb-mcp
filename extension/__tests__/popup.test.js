@@ -294,3 +294,49 @@ describe('port message routing', () => {
     expect(log.querySelectorAll('.entry').length).toBe(2);
   });
 });
+
+describe('renderClients', () => {
+  const rows = () => [...document.querySelectorAll('#clients .client')];
+
+  it('shows self-introduced name, project, host chip and model/task', () => {
+    api.renderClients([{
+      label: 'Claude · turboweb-mcp', displayName: 'Claude', project: 'turboweb-mcp',
+      sessionType: 'claude-code', hostName: 'Claude Code',
+      model: 'claude-opus-4', task: 'Testing labels', hue: 40, connectedAt: Date.now(),
+    }]);
+    const [row] = rows();
+    expect(row.querySelector('.agent-name').textContent).toBe('Claude · turboweb-mcp');
+    expect(row.querySelector('.agent-tag').textContent).toBe('Claude Code');
+    expect(row.querySelector('.agent-tag').classList.contains('claude-code')).toBe(true);
+    expect(row.querySelector('.agent-sub').textContent).toBe('claude-opus-4 — Testing labels');
+  });
+
+  it('omits a host chip that would repeat the name', () => {
+    api.renderClients([{
+      label: 'Cursor · app', displayName: 'Cursor', project: 'app',
+      sessionType: 'cursor', hostName: 'Cursor',
+    }]);
+    const [row] = rows();
+    expect(row.querySelector('.agent-name').textContent).toBe('Cursor · app');
+    expect(row.querySelector('.agent-tag')).toBeNull();
+    expect(row.querySelector('.agent-sub')).toBeNull();
+  });
+
+  it('still renders legacy labels from older servers', () => {
+    api.renderClients([{ label: 'claude-code/gem-knight#61157', sessionType: 'claude-code' }]);
+    const [row] = rows();
+    expect(row.querySelector('.agent-name').textContent).toBe('claude-code/gem-knight#61157');
+    expect(row.querySelector('.agent-tag').textContent).toBe('claude-code');
+  });
+});
+
+describe('activity client chip', () => {
+  it('prefers clientName over label parsing', () => {
+    api.renderActivity({ id: 'n1', action: 'click', status: 'start', clientName: 'Codex', clientLabel: 'Codex · proj' });
+    expect(document.querySelector('#entry-n1 .client-chip').textContent).toBe('Codex');
+  });
+  it('parses new-style labels without clientName', () => {
+    api.renderActivity({ id: 'n2', action: 'click', status: 'start', clientLabel: 'jcode · proj' });
+    expect(document.querySelector('#entry-n2 .client-chip').textContent).toBe('jcode');
+  });
+});

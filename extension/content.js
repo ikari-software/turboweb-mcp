@@ -2723,6 +2723,17 @@
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
+    // agentDisplayName picks the short "who" for badge + toast. Newer
+    // servers send clientName ("Claude", "Cursor"). Older ones only send
+    // a label: either "Claude Code · project" or the legacy
+    // "claude-code/project#1234" form.
+    function agentDisplayName(clientName, clientLabel) {
+      if (clientName) return clientName;
+      if (!clientLabel) return 'agent';
+      if (clientLabel.includes(' · ')) return clientLabel.split(' · ')[0];
+      return clientLabel.split('/').pop();
+    }
+
     function resolveTarget(action, params) {
       if (!params) return null;
       if (action === 'click' || action === 'cdp_click') {
@@ -2841,7 +2852,7 @@
       ['page_reload',         'pulse'],
     ]);
 
-    async function showStart({ action, intent, clientLabel, clientType, clientHue, params, id }) {
+    async function showStart({ action, intent, clientLabel, clientType, clientName, clientHue, params, id }) {
       try {
         // Drop out-of-order delivery: if this id's matching end already
         // arrived, the task isn't actually active.
@@ -2852,7 +2863,7 @@
         if (hostEl && typeof clientHue === 'number') {
           hostEl.style.setProperty('--client-hue', String(clientHue));
         }
-        const display = clientLabel ? clientLabel.split('/').pop() : 'agent';
+        const display = agentDisplayName(clientName, clientLabel);
         setBadge({ display, intent: intent || `${action}…` });
         if (intent) showToast(intent, display);
 

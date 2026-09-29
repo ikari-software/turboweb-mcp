@@ -96,6 +96,11 @@ type relayClientInfo struct {
 	conn        *websocket.Conn
 	label       string
 	sessionType string
+	displayName string
+	// profile holds the rest of the agent's self-description (hostName,
+	// agentName, model, task, project, clientName, clientVersion). Only
+	// whitelisted string fields are kept; see relayProfileFields.
+	profile     map[string]string
 	pid         int
 	connectedAt time.Time
 	// hue is a 0–359 degree value assigned by computeClientHues based on
@@ -203,12 +208,17 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			Type        string `json:"type"`
 			Label       string `json:"label"`
 			SessionType string `json:"sessionType"`
+			DisplayName string `json:"displayName"`
 			PID         int    `json:"pid"`
 		}
 		if json.Unmarshal(message, &ctrl) == nil && ctrl.Type == "register" {
+			var raw map[string]any
+			_ = json.Unmarshal(message, &raw)
 			relayClientsMu.Lock()
 			info.label = ctrl.Label
 			info.sessionType = ctrl.SessionType
+			info.displayName = ctrl.DisplayName
+			info.profile = pickRelayProfile(raw)
 			info.pid = ctrl.PID
 			// Compute hue inline so the very first command after
 			// register can be tagged correctly — the debounced
@@ -241,6 +251,9 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		}
 		if info.sessionType != "" {
 			req.Params["_clientType"] = info.sessionType
+		}
+		if info.displayName != "" {
+			req.Params["_clientName"] = info.displayName
 		}
 		// _clientHue lets the extension tint the cursor + toast +
 		// activity-row per agent so a human watching can distinguish
@@ -328,6 +341,12 @@ func doBroadcastClientsToBrowsers() {
 			"sessionType": c.sessionType,
 			"connectedAt": c.connectedAt.UnixMilli(),
 			"hue":         c.hue,
+		}
+		if c.displayName != "" {
+			entry["displayName"] = c.displayName
+		}
+		for k, v := range c.profile {
+			entry[k] = v
 		}
 		if c.pid != 0 {
 			entry["pid"] = c.pid
@@ -418,15 +437,8 @@ func connectRelay() {
 		logger.Printf("Connected to daemon as relay client")
 
 		// Identify ourselves to the daemon so it can attribute our commands.
-		sess := snapshotSession()
-		reg, _ := json.Marshal(map[string]any{
-			"type":        "register",
-			"label":       sess["label"],
-			"sessionType": sess["sessionType"],
-			"pid":         sess["pid"],
-		})
 		relayMu.Lock()
-		_ = conn.WriteMessage(websocket.TextMessage, reg)
+		_ = conn.WriteMessage(websocket.TextMessage, registerMessage())
 		relayMu.Unlock()
 
 		for {
@@ -784,6 +796,18 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	if _, ok := params["_clientLabel"]; !ok {
 		if lbl := getSessionLabel(); lbl != "" {
 			params["_clientLabel"] = lbl
+		}
+		// Locally-originated command (in-process mode): attach the rest of
+		// our identity too. Relayed commands keep whatever the daemon's
+		// relay handler attached, so an older relay never gets mislabelled
+		// with the daemon's own identity.
+		if _, ok := params["_clientType"]; !ok {
+			if t := getSessionType(); t != "" {
+				params["_clientType"] = t
+			}
+		}
+		if _, ok := params["_clientName"]; !ok {
+			params["_clientName"] = getSessionDisplayName()
 		}
 	}
 	// Default hue: brand. In-process mode = single agent = brand orange.

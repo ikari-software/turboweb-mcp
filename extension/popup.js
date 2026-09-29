@@ -195,13 +195,43 @@ function renderClients(clients) {
 
     const name = document.createElement('span');
     name.className = 'agent-name';
-    name.textContent = c.label || 'unknown';
-    row.appendChild(name);
+    // Title line: "<who> · <project>". Newer servers send the pieces
+    // separately. Older ones only send `label`.
+    const who = c.displayName || shortAgentName({ clientLabel: c.label }) || 'unknown';
+    const project = c.project || '';
+    name.textContent = project ? `${who} · ${project}` : (c.label || who);
+    // Hover shows everything we know, for debugging mislabels.
+    name.title = [
+      c.label,
+      c.hostName && `host: ${c.hostName}`,
+      c.clientName && `client: ${c.clientName}${c.clientVersion ? ' ' + c.clientVersion : ''}`,
+      c.model && `model: ${c.model}`,
+      c.task && `task: ${c.task}`,
+      c.pid && `pid: ${c.pid}`,
+    ].filter(Boolean).join('\n');
 
-    if (c.sessionType) {
+    // Sub-line with model + task when the agent introduced itself.
+    const sub = [c.model, c.task].filter(Boolean).join(' — ');
+    if (sub) {
+      const wrap = document.createElement('span');
+      wrap.className = 'agent-text';
+      wrap.appendChild(name);
+      const subEl = document.createElement('span');
+      subEl.className = 'agent-sub';
+      subEl.textContent = sub;
+      wrap.appendChild(subEl);
+      row.appendChild(wrap);
+    } else {
+      row.appendChild(name);
+    }
+
+    // Host chip. Skip it when it would just repeat the name ("Cursor"
+    // next to "Cursor · proj").
+    const hostLabel = c.hostName || c.sessionType || '';
+    if (hostLabel && hostLabel !== who) {
       const tag = document.createElement('span');
-      tag.className = 'agent-tag ' + c.sessionType;
-      tag.textContent = c.sessionType;
+      tag.className = 'agent-tag ' + (c.sessionType || '');
+      tag.textContent = hostLabel;
       row.appendChild(tag);
     }
 
@@ -296,8 +326,19 @@ if (typeof document !== 'undefined' && document.addEventListener) {
 
 function entryMatchesFilter(e, q) {
   if (!q) return true;
-  return [e.action, e.intent, e.clientLabel, e.clientType, e.error]
+  return [e.action, e.intent, e.clientLabel, e.clientName, e.clientType, e.error]
     .filter(Boolean).some(s => s.toLowerCase().includes(q));
+}
+
+// shortAgentName is the compact "who" for chips. Prefers the server-sent
+// clientName, then parses either label format ("Claude · proj" or the
+// legacy "claude-code/proj#123").
+function shortAgentName(data) {
+  if (data.clientName) return data.clientName;
+  const label = data.clientLabel || '';
+  if (!label) return '';
+  if (label.includes(' · ')) return label.split(' · ')[0];
+  return label.split('/').pop();
 }
 
 function buildEntryRow(data) {
@@ -314,7 +355,7 @@ function buildEntryRow(data) {
   const errCls = data.status === 'error' || data.error ? ' err' : '';
   const intent = data.intent || data.error || data.resultSummary || '';
   const intentMuted = !data.intent ? ' muted' : '';
-  const clientLabel = data.clientLabel ? data.clientLabel.split('/').pop() : '';
+  const clientLabel = shortAgentName(data);
 
   const row = document.createElement('div');
   row.className = 'entry-row';

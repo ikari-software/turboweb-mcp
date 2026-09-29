@@ -160,6 +160,8 @@
   .client:last-child { border-bottom: none; }
   .client .agent-icon { width: 14px; height: 14px; flex-shrink: 0; }
   .client .agent-name { flex: 1; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .client .agent-text { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .client .agent-sub  { color: var(--fg-2); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .client .agent-meta { color: var(--fg-2); font-size: 9px; }
   .client .agent-tag {
     background: var(--tag-bg); color: var(--tag-fg);
@@ -167,8 +169,11 @@
     font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px;
   }
   .client .agent-tag.claude-code,
-  .client .agent-tag.claude  { background: var(--claude-bg); color: var(--claude-fg); }
+  .client .agent-tag.claude,
+  .client .agent-tag.claude-desktop { background: var(--claude-bg); color: var(--claude-fg); }
   .client .agent-tag.cursor,
+  .client .agent-tag.windsurf,
+  .client .agent-tag.zed,
   .client .agent-tag.vscode  { background: var(--ide-bg);    color: var(--ide-fg);    }
   .clients-empty { color: var(--fg-2); padding: 8px; text-align: center; font-style: italic; }
 
