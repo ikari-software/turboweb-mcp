@@ -52,6 +52,18 @@ name: release
 on:
   release:
     types: [published]
+  # Called by release-please.yml after it builds and uploads assets to a
+  # DRAFT release. release-please.yml then publishes the release with the
+  # default GITHUB_TOKEN, and events caused by that token don't trigger
+  # workflows, so the `release: published` trigger above won't sign twice.
+  # Reusable-workflow runs keep this file as the cosign certificate identity
+  # (job_workflow_ref), so SECURITY.md's verify command is unchanged.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to sign (e.g. v1.13.0)"
+        required: true
+        type: string
   # Manual re-run: useful when the release tag predates a workflow fix, or
   # to sign a release that was published before this workflow existed.
   workflow_dispatch:

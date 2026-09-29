@@ -88,16 +88,7 @@ Firefox polls this JSON daily; when its `version` is newer than the
 installed XPI, Firefox downloads the linked `.xpi` and replaces the
 extension in place.
 
-The release workflow:
-
-```bash
-make release                            # builds + signs + emits firefox-updates.json
-git tag v$(make -s print-VERSION)       # or `git tag v1.3.0` manually
-git push --tags
-gh release create v1.3.0 dist/*         # uploads xpi + updates.json + binaries
-```
-
-Once the GitHub release is published, the `releases/latest/download/`
+Once a GitHub release is published (see [Releasing](#releasing)), the `releases/latest/download/`
 URL resolves to the newly uploaded `firefox-updates.json`, and every
 installed extension picks up the new version within ~24h. To force a
 check sooner: `about:addons` → gear → **Check for updates**.
@@ -105,6 +96,28 @@ check sooner: `about:addons` → gear → **Check for updates**.
 Note: `update_url` is part of the *signed* manifest, so a one-time
 manual reinstall is required to migrate users from any pre-1.3.0 XPI
 (which has no `update_url`) onto the auto-update channel.
+
+### Releasing
+
+Releases are automated with
+[release-please](https://github.com/googleapis/release-please). Use
+[conventional commit](https://www.conventionalcommits.org/) PR titles
+(`feat: …`, `fix: …`, `feat!: …` for breaking changes). They decide the
+version bump and become the CHANGELOG entry, so don't edit `VERSION` or
+`CHANGELOG.md` by hand.
+
+1. Every push to `master` updates an open **`chore(master): release X.Y.Z`**
+   PR that bumps `VERSION` and prepends the changelog entry.
+2. Merge that PR when you want to ship. `.github/workflows/release-please.yml`
+   then tags `vX.Y.Z`, creates a draft release, runs `make release` on macOS
+   (binaries, extension zips, AMO-signed XPI, `firefox-updates.json`),
+   notarizes + cosign-signs via `release.yml`, and publishes the release.
+
+The release body (the changelog entry) is what `check_for_updates` /
+`self_update` show agents as `whatsNew`, so write PR titles for that audience.
+
+Manual fallback (e.g. CI outage): `make release`, then
+`gh release create vX.Y.Z dist/*`. `release.yml` still signs on publish.
 
 ## Install
 
