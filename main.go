@@ -81,6 +81,10 @@ the extension popup). Without it the overlay goes silent.
 bypasses the overlay entirely. For reads, prefer `+"`extract_text` / `find_text`"+`
 / `+"`inspect` / `get_interactive_map`"+` — they animate; raw JS reads don't.
 
+⚠️ Call `+"`introduce`"+` FIRST, once per session, with your name (and model /
+host / task if known). Every other tool refuses to run until you do, so the
+human sees who is driving instead of a guessed editor name.
+
 For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 `)),
 	)
@@ -96,6 +100,7 @@ For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 }
 
 func registerAllTools(s *server.MCPServer) {
+	registerSessionTools(s)
 	registerBrowserTools(s)
 	registerDomTools(s)
 	registerFrameTools(s)
@@ -150,5 +155,6 @@ func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc)
 	if _, hasFrame := tool.InputSchema.Properties["frame"]; hasFrame && tool.Name != "navigate" {
 		handler = injectStickyFrame(handler)
 	}
+	handler = requireIntroduction(tool.Name, handler)
 	s.AddTool(tool, handler)
 }
