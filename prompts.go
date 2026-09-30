@@ -163,16 +163,19 @@ version %s.
 3. Verify SHA256SUMS via cosign verify-blob against the repo's release-
    workflow identity before running anything — instructions in SECURITY.md.
    If verification fails, STOP and tell me; do not run the binary.
-4. Locate the existing turboweb-mcp-by-ikari binary on $PATH (which
+4. On macOS/Linux, ensure the downloaded binary is executable
+   (chmod +x <binary>) — GitHub release assets arrive without the +x bit.
+   Windows .exe needs no change.
+5. Locate the existing turboweb-mcp-by-ikari binary on $PATH (which
    $(which turboweb-mcp-by-ikari) should resolve). Swap it for the new one,
    preserving the path. The old binary's stale daemon will detect the
    newer mtime on its next /version probe and respawn itself.
-5. Unpack the new extension zip over the existing extension directory.
+6. Unpack the new extension zip over the existing extension directory.
    In chrome://extensions / about:debugging, reload the extension so the
    new bundle loads.
-6. Run a connection check — list my browser tabs — to confirm the new
+7. Run a connection check — list my browser tabs — to confirm the new
    daemon + extension are talking.
-7. Tell me the version delta (%s → latest) and the highlight of what
+8. Tell me the version delta (%s → latest) and the highlight of what
    changed (read the release notes from the GitHub release).
 
 Do NOT rewrite my MCP client config (~/.claude.json, ~/.cursor/mcp.json,
