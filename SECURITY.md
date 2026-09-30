@@ -83,6 +83,9 @@ cosign verify-blob \
 shasum -a 256 -c SHA256SUMS --ignore-missing
 #    Linux:
 sha256sum -c SHA256SUMS --ignore-missing
+
+# 4. macOS/Linux only — GitHub release assets download without +x:
+chmod +x turboweb-mcp-by-ikari-darwin-arm64   # or the linux-* asset
 ```
 
 If step 2 fails with a non-matching certificate identity, the file did
