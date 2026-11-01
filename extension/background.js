@@ -1455,6 +1455,9 @@ async function dispatch(action, params) {
         maxDepth: params.maxDepth, maxLength: params.maxLength, frame: params.frame,
       });
 
+    case 'capture_page':
+      return await toContent(params.tabId, 'capture_page', { scroll: params.scroll });
+
     case 'get_page_structure':
       return await toContent(params.tabId, 'get_page_structure', {
         selector: params.selector, maxDepth: params.maxDepth, visibleOnly: params.visibleOnly, frame: params.frame,

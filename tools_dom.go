@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -140,6 +143,20 @@ func registerDomTools(s *server.MCPServer) {
 			frameOpt(),
 		),
 		handleGetHTML,
+	)
+
+	// --- capture_page ---
+	addTool(s,
+		mcp.NewTool("capture_page",
+			mcp.WithDescription("Capture the page's full rendered DOM from the user's real browser session "+
+				"(logged-in, past bot challenges) to a local .html file and return its path; the HTML itself "+
+				"is not returned. Scrolls first so lazy content loads, keeps live form values (never passwords), "+
+				"turns canvases into images. Hand the path to an archiver such as ffsync-mcp page_archive_file."),
+			mcp.WithBoolean("scroll", mcp.Description("Scroll through the page first to trigger lazy loading (default true)")),
+			mcp.WithString("path", mcp.Description("Output file (default: a new file under the system temp dir)")),
+			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+		),
+		handleCapturePage,
 	)
 
 	// --- get_interactive_map ---
@@ -343,6 +360,41 @@ func handleGetHTML(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolRes
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func handleCapturePage(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	params := map[string]any{}
+	for k, v := range rawArgs(args) {
+		if k != "path" { // local to this process; the extension has no use for it
+			params[k] = v
+		}
+	}
+	raw, err := send("capture_page", params, 120000)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	var page struct {
+		URL   string `json:"url"`
+		Title string `json:"title"`
+		HTML  string `json:"html"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil || page.HTML == "" {
+		return mcp.NewToolResultError("capture_page: extension returned no DOM"), nil
+	}
+	path := toString(args["path"])
+	if path == "" {
+		dir := filepath.Join(os.TempDir(), "turboweb-captures")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		path = filepath.Join(dir, fmt.Sprintf("capture-%d.html", time.Now().UnixNano()))
+	}
+	if err := os.WriteFile(path, []byte(page.HTML), 0o600); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	out, _ := json.Marshal(map[string]any{"path": path, "url": page.URL, "title": page.Title, "bytes": len(page.HTML)})
+	return mcp.NewToolResultText(string(out)), nil
 }
 
 func handleGetInteractiveMap(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
