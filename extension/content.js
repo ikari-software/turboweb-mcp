@@ -1099,6 +1099,62 @@
   }
 
   // --- Get HTML (with depth/length limits) ---
+  // Full-fidelity DOM capture for archiving (ffsync-mcp page_archive_file).
+  // Runs in the user's real session, so logged-in and challenge-cleared pages
+  // come out as the user sees them. Serializes a clone so the live page is
+  // untouched, carrying over state that outerHTML alone would lose.
+  async function capturePage({ scroll = true } = {}) {
+    if (scroll) {
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const startY = window.scrollY;
+      for (let y = 0; y < document.documentElement.scrollHeight && y < 40000; y += window.innerHeight) {
+        window.scrollTo(0, y);
+        await sleep(120); // let lazy loaders react
+      }
+      window.scrollTo(0, startY);
+      await sleep(400);
+    }
+    const clone = document.documentElement.cloneNode(true);
+    clone.querySelector('#__turbo_overlay_host')?.remove();
+    const sel = 'input, textarea, select, canvas';
+    const live = document.documentElement.querySelectorAll(sel);
+    const copy = clone.querySelectorAll(sel);
+    for (let i = 0; i < live.length && i < copy.length; i++) {
+      const o = live[i], c = copy[i];
+      switch (o.tagName) {
+        case 'INPUT':
+          if (o.type === 'password' || o.type === 'file') break; // never persist secrets
+          if (o.type === 'checkbox' || o.type === 'radio') {
+            if (o.checked) c.setAttribute('checked', ''); else c.removeAttribute('checked');
+          } else {
+            c.setAttribute('value', o.value);
+          }
+          break;
+        case 'TEXTAREA':
+          c.textContent = o.value;
+          break;
+        case 'SELECT':
+          [...o.options].forEach((opt, j) => {
+            if (opt.selected) c.options[j]?.setAttribute('selected', ''); else c.options[j]?.removeAttribute('selected');
+          });
+          break;
+        case 'CANVAS':
+          try {
+            const img = document.createElement('img');
+            img.src = o.toDataURL();
+            for (const a of ['id', 'class', 'style']) if (o.hasAttribute(a)) img.setAttribute(a, o.getAttribute(a));
+            img.width = o.width;
+            img.height = o.height;
+            c.replaceWith(img);
+          } catch { /* tainted canvas: leave it blank */ }
+          break;
+      }
+    }
+    const dt = document.doctype ? new XMLSerializer().serializeToString(document.doctype) : '';
+    const html = dt + clone.outerHTML;
+    return { url: location.href, title: document.title, html, length: html.length };
+  }
+
   function getHTML({ selector, outer = false, maxDepth = 0, maxLength = 200000, frame }) {
     const { root: fdoc, framePath } = frameCtx(frame);
     const el = selector ? fdoc.querySelector(selector) : fdoc.documentElement;
@@ -2823,6 +2879,7 @@
       // Camera flash for snapshot-style actions
       ['screenshot',          'flash'],
       ['turbo_snapshot',      'flash'],
+      ['capture_page',        'flash'],
       // Page-DOM read → scanline sweep
       ['get_html',            'sweep'],
       ['page_yaml',           'sweep'],
@@ -3265,6 +3322,7 @@
       scroll: (p) => scrollPage(p),
       scroll_into_view: (p) => scrollIntoViewInFrame(p),
       get_html: (p) => getHTML(p),
+      capture_page: (p) => capturePage(p),
       get_page_structure: (p) => getPageStructure(p),
       execute_js_isolated: (p) => executeJS(p),
       inject_script: (p) => injectScript(p),

@@ -51,7 +51,7 @@ beforeAll(() => {
     'sel', 'viewport', 'extractText', 'findText', 'inspectElement',
     'getInteractiveMap', 'queryElements', 'inspectForm', 'pageCapabilities',
     'clickElement', 'typeText',
-    'scrollPage', 'getHTML', 'depthLimitedHTML', 'getPageStructure',
+    'scrollPage', 'getHTML', 'capturePage', 'depthLimitedHTML', 'getPageStructure',
     'executeJS', 'injectScript', 'prepareForUserClick', 'overlay',
     'dragDropFile', 'runDropInPage', '__turboPerformDrop',
     'domMutationsMark', 'domMutationsSince', 'screenshotDiffMeta',
@@ -1587,5 +1587,48 @@ describe('agent-driven tab flag', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('capturePage', () => {
+  it('serializes a clone with live form state and canvases, minus overlay and passwords', async () => {
+    document.body.innerHTML = `
+      <div id="__turbo_overlay_host">overlay</div>
+      <input id="t" value="old"><input id="pw" type="password">
+      <input id="cb" type="checkbox"><textarea id="ta"></textarea>
+      <select id="s"><option>a</option><option>b</option></select>
+      <canvas id="cv" width="4" height="2" class="chart"></canvas>`;
+    document.getElementById('t').value = 'typed';
+    document.getElementById('pw').value = 'hunter2';
+    document.getElementById('cb').checked = true;
+    document.getElementById('ta').value = 'notes';
+    document.getElementById('s').selectedIndex = 1;
+    document.getElementById('cv').toDataURL = () => 'data:image/png;base64,QUJD';
+
+    const r = await api.capturePage({ scroll: false });
+
+    expect(r.url).toBe(location.href);
+    expect(r.length).toBe(r.html.length);
+    expect(r.html).not.toContain('__turbo_overlay_host');
+    expect(r.html).toContain('value="typed"');
+    expect(r.html).not.toContain('hunter2');
+    expect(r.html).toMatch(/<input id="cb" type="checkbox" checked="">/);
+    expect(r.html).toContain('>notes</textarea>');
+    expect(r.html).toMatch(/<option selected="">b<\/option>/);
+    expect(r.html).toMatch(/<img [^>]*src="data:image\/png;base64,QUJD"[^>]*class="chart"/);
+    expect(r.html).not.toContain('<canvas');
+    // The live page is untouched.
+    expect(document.getElementById('__turbo_overlay_host')).not.toBeNull();
+    expect(document.querySelector('canvas')).not.toBeNull();
+    expect(document.getElementById('t').getAttribute('value')).toBe('old');
+  });
+
+  it('is routed by the message handler', async () => {
+    document.body.innerHTML = '<p>hi</p>';
+    const r = await new Promise((resolve) => {
+      const ret = messageHandler({ action: 'capture_page', params: { scroll: false } }, {}, resolve);
+      expect(ret).toBe(true); // async response
+    });
+    expect(r.html).toContain('<p>hi</p>');
   });
 });
