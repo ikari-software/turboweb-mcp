@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.14.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.13.0...v1.14.0) (2026-11-03)
+
+
+### Features
+
+* capture_page saves the tab's rendered DOM to a local file ([#32](https://github.com/ikari-software/turboweb-mcp/issues/32)) ([5ccf7d9](https://github.com/ikari-software/turboweb-mcp/commit/5ccf7d9751d934ac052b153bbc66f91b44d476f5))
+
+
+### Bug Fixes
+
+* browser-prefixed tab ids so Firefox and Zen tabs don't collide ([#34](https://github.com/ikari-software/turboweb-mcp/issues/34)) ([e46dd97](https://github.com/ikari-software/turboweb-mcp/commit/e46dd97344b14966ae40d9140852041e96940061))
+
 ## [1.13.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.12.1...v1.13.0) (2026-09-29)
 
 
