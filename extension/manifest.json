@@ -17,6 +17,7 @@
     "scripting",
     "debugger",
     "alarms",
+    "storage",
     "webNavigation"
   ],
   "host_permissions": [
