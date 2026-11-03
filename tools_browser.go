@@ -54,7 +54,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- list_tabs ---
 	addTool(s,
 		mcp.NewTool("list_tabs",
-			mcp.WithDescription("List all open Chrome tabs with their IDs, titles, and URLs"),
+			mcp.WithDescription("List open tabs in every connected browser with their IDs, titles, URLs and browser. IDs look like \"zen-3f9a1c2b:42\": browsers number tabs independently, so pass the ID as given to other tools' tabId."),
 		),
 		handleListTabs,
 	)
@@ -68,7 +68,7 @@ func registerBrowserTools(s *server.MCPServer) {
 				"handlers) keeps working. Navigating to a frame's content URL at the top level "+
 				"strips the shell and breaks that JS."),
 			mcp.WithString("url", mcp.Required(), mcp.Description("URL to navigate to")),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithString("frame", mcp.Description(
 				"Optional. Navigate only this frame, leaving the parent frameset intact. "+
 					"A framePath (\">\"-separated CSS selectors, e.g. \"#top_frame\" or "+
@@ -82,7 +82,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	addTool(s,
 		mcp.NewTool("screenshot",
 			mcp.WithDescription("Take a screenshot of a tab. Returns a JPEG image scaled to maxWidth (default 1280px, NOT retina 3000px). Fast and compact."),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithNumber("maxWidth", mcp.Description("Max width in pixels (default 1280)")),
 			mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default 70)")),
 		),
@@ -93,7 +93,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	addTool(s,
 		mcp.NewTool("turbo_snapshot",
 			mcp.WithDescription("TURBO: Screenshot + interactive element map in ONE call. Returns a scaled JPEG image AND a JSON spatial map of all interactive elements. The fastest way to understand a page."),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithNumber("maxWidth", mcp.Description("Screenshot max width (default 1280)")),
 			mcp.WithNumber("quality", mcp.Description("JPEG quality 1-100 (default 70)")),
 		),
@@ -107,7 +107,7 @@ func registerBrowserTools(s *server.MCPServer) {
 			mcp.WithString("baselineId", mcp.Description("Token from a previous screenshot_diff call. Diff the current page against that cached baseline.")),
 			mcp.WithString("before", mcp.Description("Base64 JPEG/PNG explicit before-image. Ignored if baselineId is set.")),
 			mcp.WithString("after", mcp.Description("Base64 JPEG/PNG explicit after-image. If omitted the tool captures the current page state itself.")),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithNumber("threshold", mcp.Description("Per-pixel perceptual delta 0..1 above which a pixel counts as changed (default 0.10)")),
 			mcp.WithNumber("minScore", mcp.Description("Similarity 0..1 below which the verdict is 'changed' (default 0.997)")),
 			mcp.WithBoolean("includeThumb", mcp.Description("Append an annotated diff thumbnail image (default false — the point of the tool is to avoid shipping images)")),

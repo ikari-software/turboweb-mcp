@@ -30,7 +30,7 @@ func resolveContext(tabId any) (string, error) {
 		return "", err
 	}
 
-	id := intOr(tabId, 0)
+	id := tabNum(tabId)
 
 	if err := refreshContextMap(); err != nil {
 		return "", fmt.Errorf("context refresh: %w", err)
@@ -157,13 +157,23 @@ func ingestExtensionTabsForBiDi(raw json.RawMessage) error {
 	}
 
 	type extTab struct {
-		ID     int    `json:"id"`
+		ID     int
 		URL    string `json:"url"`
 		Active bool   `json:"active"`
 	}
-	var tabs []extTab
-	if err := json.Unmarshal(raw, &tabs); err != nil {
+	// list_tabs ids are browser-prefixed refs ("zen-3f9a1c2b:42"); BiDi
+	// drives a single browser, so only the numeric part matters here.
+	var listed []struct {
+		ID     any    `json:"id"`
+		URL    string `json:"url"`
+		Active bool   `json:"active"`
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil {
 		return err
+	}
+	tabs := make([]extTab, len(listed))
+	for i, t := range listed {
+		tabs[i] = extTab{ID: tabNum(t.ID), URL: t.URL, Active: t.Active}
 	}
 
 	if err := refreshContextMap(); err != nil {

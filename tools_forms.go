@@ -34,7 +34,7 @@ func registerFormTools(s *server.MCPServer) {
 			mcp.WithString("formSelector", mcp.Description(
 				"CSS selector to disambiguate when the page has multiple forms. "+
 					"Omit to use the first/largest form.")),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithBoolean("apply", mcp.Description(
 				"If false, do NOT navigate — return the planned URL and mapping only "+
 					"(dry run). Default true.")),

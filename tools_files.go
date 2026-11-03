@@ -26,7 +26,7 @@ func registerFileTools(s *server.MCPServer) {
 				mcp.Description("Absolute filesystem paths on the MCP server host. Relative paths are rejected. ~/foo is expanded."),
 				mcp.Items(map[string]any{"type": "string"}),
 			),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 		),
 		handleSetInputFiles,
 	)
@@ -44,7 +44,7 @@ func registerFileTools(s *server.MCPServer) {
 				mcp.Description("Files to auto-attach when a chooser opens. Required when enable=true."),
 				mcp.Items(map[string]any{"type": "string"}),
 			),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 		),
 		handleInterceptFileChooser,
 	)
@@ -65,7 +65,7 @@ func registerFileTools(s *server.MCPServer) {
 				mcp.Description("Absolute filesystem path on the MCP server host. Relative paths are rejected; ~/foo is expanded; symlinks are resolved.")),
 			mcp.WithString("mimeType",
 				mcp.Description("Override the File MIME type. Default: sniffed from the file extension, falling back to application/octet-stream.")),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 		),
 		handleDragDropFile,
 	)

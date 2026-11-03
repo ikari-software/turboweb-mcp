@@ -197,6 +197,31 @@ function forceReconnect(reason) {
   scheduleReconnect();
 }
 
+// --- Browser instance identity ---
+// Tab IDs are only unique within one browser, so the server prefixes them
+// with this per-profile ID to tell Firefox's tab 122 from Zen's tab 122.
+// Minted once and kept in storage.local, so it survives restarts and
+// reconnects; it changes only if the extension's storage is wiped.
+let instanceIdPromise = null;
+function getInstanceId() {
+  if (!instanceIdPromise) {
+    instanceIdPromise = (async () => {
+      try {
+        const got = await chrome.storage.local.get('instanceId');
+        if (got && got.instanceId) return got.instanceId;
+        const id = crypto.randomUUID();
+        await chrome.storage.local.set({ instanceId: id });
+        return id;
+      } catch (_) {
+        // No storage: the extension's own origin is per-profile on Firefox,
+        // though shared by every profile on Chrome.
+        return chrome.runtime.getURL('');
+      }
+    })();
+  }
+  return instanceIdPromise;
+}
+
 // --- WebSocket connection with auto-reconnect ---
 function connect() {
   // Don't double-connect
@@ -209,7 +234,7 @@ function connect() {
     return;
   }
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     console.log('[turbo] Connected to MCP server');
     reconnectDelay = 500;
     startKeepalive();
@@ -227,7 +252,8 @@ function connect() {
       } catch (_) {}
       return u;
     })();
-    try { ws.send(JSON.stringify({ type: 'hello', ua: _helloUA })); } catch (_) {}
+    const instance = await getInstanceId();
+    try { ws.send(JSON.stringify({ type: 'hello', ua: _helloUA, instance })); } catch (_) {}
   };
 
   ws.onmessage = async (event) => {

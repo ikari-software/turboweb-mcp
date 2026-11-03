@@ -123,7 +123,9 @@ toast. Bypassing them with execute_js leaves the user blind.
 # Multi-tab orchestration
 
 - Every tool accepts an optional tabId. list_tabs to discover targets;
-  pass tabId to drive a specific window.
+  pass tabId to drive a specific window. Pass IDs exactly as list_tabs
+  gives them ("zen-3f9a1c2b:42"): each browser numbers its own tabs, so a
+  bare 42 may exist in Zen and Firefox at once.
 - The daemon supports multiple agents driving the same browser, and a
   single agent driving multiple browsers. When you take a tabId-aware
   action, the on-page overlay tints with this agent's hue so the user can

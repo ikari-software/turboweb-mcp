@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,10 +31,12 @@ const jsBrowserFingerprint = `(function(){` +
 
 // BrowserConnection represents a connected Chrome/Arc/Brave/Edge extension.
 type BrowserConnection struct {
-	conn   *websocket.Conn
-	name   string
-	tabIDs map[int]bool // tabID -> isActive (true when that tab is the focused one)
-	mu     sync.Mutex  // protects conn writes
+	conn     *websocket.Conn
+	name     string
+	instance string       // per-profile ID from the extension's hello; keys tab refs
+	seq      int          // connection number, the tab-ref key for extensions without an instance ID
+	tabIDs   map[int]bool // tabID -> isActive (true when that tab is the focused one)
+	mu       sync.Mutex   // protects conn writes
 }
 
 type pendingRequest struct {
@@ -50,6 +53,8 @@ var (
 	pendingMu sync.Mutex
 
 	nextID atomic.Int64
+
+	connSeq atomic.Int64
 
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -517,6 +522,7 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 	bc := &BrowserConnection{
 		conn:   conn,
 		name:   fmt.Sprintf("browser-%d", len(browsers)+1),
+		seq:    int(connSeq.Add(1)),
 		tabIDs: make(map[int]bool),
 	}
 	// Browser name is set by the 'hello' push message the extension sends
@@ -555,11 +561,13 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		// an active tab — which could fail with "No active tab found" when
 		// the daemon restarts in the background.
 		var hello struct {
-			Type string `json:"type"`
-			UA   string `json:"ua"`
+			Type     string `json:"type"`
+			UA       string `json:"ua"`
+			Instance string `json:"instance"`
 		}
 		if json.Unmarshal(message, &hello) == nil && hello.Type == "hello" && hello.UA != "" {
 			bc.mu.Lock()
+			bc.instance = hello.Instance
 			switch {
 			case contains(hello.UA, "Zen"):
 				bc.name = "Zen"
@@ -843,11 +851,22 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	}
 
 	// If tabId specified, route to owning browser
-	if params != nil {
-		if tabIDRaw, ok := params["tabId"]; ok && tabIDRaw != nil {
-			tabID := toInt(tabIDRaw)
-			return sendToTab(open, tabID, action, params, timeout)
+	if tabIDRaw, ok := params["tabId"]; ok && tabIDRaw != nil {
+		key, tabID, ok := parseTabRef(tabIDRaw)
+		if !ok {
+			return nil, fmt.Errorf("Invalid tabId %v: use an id from list_tabs, e.g. \"zen-3f9a1c2b:42\"", tabIDRaw)
 		}
+		// The extension only knows its own numeric IDs.
+		params["tabId"] = tabID
+		if key != "" {
+			for _, bc := range open {
+				if bc.instanceKey() == key {
+					return sendTo(bc, action, params, timeout)
+				}
+			}
+			return nil, fmt.Errorf("Tab %v: that browser is not connected; run list_tabs for current ids", tabIDRaw)
+		}
+		return sendToTab(open, tabID, action, params, timeout)
 	}
 
 	// No tabId — use first browser
@@ -870,22 +889,29 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 			if err != nil {
 				return
 			}
-			var tabs []json.RawMessage
+			var tabs []map[string]any
 			if json.Unmarshal(raw, &tabs) == nil {
-				results[i] = result{tabs: tabs}
-				// Cache tab IDs with active state for disambiguation
-				// when multiple browsers share the same tab ID.
-				for _, t := range tabs {
-					var tab struct {
-						ID     int  `json:"id"`
-						Active bool `json:"active"`
-					}
-					if json.Unmarshal(t, &tab) == nil {
-						bc.mu.Lock()
-						bc.tabIDs[tab.ID] = tab.Active
-						bc.mu.Unlock()
-					}
+				// Replace the cache wholesale so closed tabs don't linger and
+				// look like they exist in two browsers.
+				owned := make(map[int]bool, len(tabs))
+				prefix := bc.tabPrefix()
+				bc.mu.Lock()
+				name := bc.name
+				bc.mu.Unlock()
+				out := make([]json.RawMessage, 0, len(tabs))
+				for _, tab := range tabs {
+					id := toInt(tab["id"])
+					active, _ := tab["active"].(bool)
+					owned[id] = active
+					tab["id"] = prefix + ":" + strconv.Itoa(id)
+					tab["browser"] = name
+					b, _ := json.Marshal(tab)
+					out = append(out, b)
 				}
+				bc.mu.Lock()
+				bc.tabIDs = owned
+				bc.mu.Unlock()
+				results[i] = result{tabs: out}
 			}
 		}(i, bc)
 	}
@@ -936,28 +962,41 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 	return merged, nil
 }
 
-// sendToTab routes a command to the browser that owns the given tab ID.
-// When multiple browsers have the same tab ID cached (common with multi-window
-// setups like Zen), the browser whose tab is currently active wins.
-func sendToTab(open []*BrowserConnection, tabID int, action string, params map[string]any, timeout int) (json.RawMessage, error) {
-	// Check cached ownership — prefer the browser where this tab is active.
-	var candidate *BrowserConnection
+// owners returns the browsers whose last list_tabs included tabID.
+func owners(open []*BrowserConnection, tabID int) []*BrowserConnection {
+	var out []*BrowserConnection
 	for _, bc := range open {
 		bc.mu.Lock()
-		isActive, owns := bc.tabIDs[tabID]
+		_, owns := bc.tabIDs[tabID]
 		bc.mu.Unlock()
 		if owns {
-			if isActive {
-				candidate = bc
-				break // active tab wins immediately; no need to check further
-			}
-			if candidate == nil {
-				candidate = bc // keep as fallback if no active one is found
-			}
+			out = append(out, bc)
 		}
 	}
-	if candidate != nil {
-		return sendTo(candidate, action, params, timeout)
+	return out
+}
+
+// sendToTab routes a command addressed by a bare numeric tab ID. Each browser
+// numbers its tabs independently, so a bare ID is only usable when exactly one
+// browser has it; otherwise the caller must use a prefixed ref from list_tabs.
+func sendToTab(open []*BrowserConnection, tabID int, action string, params map[string]any, timeout int) (json.RawMessage, error) {
+	found := owners(open, tabID)
+	if len(found) == 0 && len(open) > 1 {
+		// Stale or empty cache: refresh it rather than guess.
+		if _, err := sendListTabs(open, timeout); err == nil {
+			found = owners(open, tabID)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return sendTo(found[0], action, params, timeout)
+	case 0:
+	default:
+		refs := make([]string, len(found))
+		for i, bc := range found {
+			refs[i] = strconv.Quote(bc.tabRef(tabID))
+		}
+		return nil, fmt.Errorf("Tab %d exists in more than one browser: pass %s instead", tabID, strings.Join(refs, " or "))
 	}
 	// Not cached — try each browser; first success wins.
 	for _, bc := range open {

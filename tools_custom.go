@@ -229,7 +229,7 @@ func registerCustomTools(s *server.MCPServer) {
 			mcp.WithDescription("Run a previously created custom tool by name. Pass arguments as a JSON object."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Name of the custom tool to run")),
 			mcp.WithObject("args", mcp.Description("Arguments to pass to the tool (as JSON object)")),
-			mcp.WithNumber("tabId", mcp.Description("Tab ID (omit for active tab)")),
+			tabIDParam(),
 			mcp.WithString("question", mcp.Description("If provided, Haiku processes the result and answers this question")),
 		),
 		handleRunTool,
