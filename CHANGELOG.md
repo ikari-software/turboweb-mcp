@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.15.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.14.0...v1.15.0) (2026-11-11)
+
+
+### Features
+
+* tab management tools, mandatory tabId, and errors that say what to do next ([#35](https://github.com/ikari-software/turboweb-mcp/issues/35)) ([e81c056](https://github.com/ikari-software/turboweb-mcp/commit/e81c056342182a2108ed4dca39eb6feb6c622b4e))
+
 ## [1.14.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.13.0...v1.14.0) (2026-11-03)
 
 
