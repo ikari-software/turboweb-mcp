@@ -15,6 +15,14 @@ const NATIVE_RECHECK_INTERVAL_MS = 30000;
 // How long inspect_form waits for a freshly-navigated tab to reach
 // status:'complete' before inspecting anyway (slow SPA tolerance).
 const INSPECT_FORM_NAV_TIMEOUT_MS = 8000;
+// How long open_tab waits for the new tab's URL to finish loading before
+// returning the tab anyway.
+const OPEN_TAB_LOAD_TIMEOUT_MS = 15000;
+// wake_tab: how long to wait for an unloaded tab to finish loading, how often
+// to look, and when to fall back from reload to re-setting the tab's URL.
+const WAKE_TAB_TIMEOUT_MS = 20000;
+const WAKE_TAB_POLL_MS = 100;
+const WAKE_TAB_NUDGE_MS = 2000;
 
 // --- Telemetry & popup communication ---
 const stats = { commands: 0, errors: 0, totalMs: 0, startedAt: Date.now() };
@@ -111,6 +119,10 @@ function summariseResult(action, result) {
     if (action === 'type_text') return `typed ${result.typed ?? 0} chars`;
     if (action === 'scroll') return `scroll ${result.scrollX ?? 0},${result.scrollY ?? 0}`;
     if (action === 'navigate') return result.url || '';
+    if (action === 'open_tab') return result.url || 'new tab';
+    if (action === 'wake_tab') return result.interactive ? 'awake' : (result.reason || 'not interactive');
+    if (action === 'close_tabs') return `closed ${result.closed?.length ?? 0}`;
+    if (action === 'move_tabs') return `moved ${result.tabs?.length ?? 0}`;
   } catch {}
   return '';
 }
@@ -375,6 +387,7 @@ function connect() {
       stats.errors++;
       // Tell the overlay so the cursor can shake + flash red.
       notifyOverlay(params.tabId, { kind: 'error', id: cmdId, action: msg.action, error: e.message });
+      const error = await explainError(e, params);
       logActivity({
         ...baseEntry,
         status: 'error',
@@ -383,7 +396,7 @@ function connect() {
         timestamp: Date.now(),
       });
       broadcast({ type: 'stats', ...getStats() });
-      ws.send(JSON.stringify({ id: msg.id, error: e.message }));
+      ws.send(JSON.stringify({ id: msg.id, error }));
     }
   };
 
@@ -419,6 +432,149 @@ async function resolveTab(tabId) {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) throw new Error('No active tab found');
   return tab.id;
+}
+
+// Pages no extension may script: the browser's own UI, other extensions, the
+// add-on stores and view-source.
+const UNSCRIPTABLE_URL = /^(about:(?!blank|srcdoc)|chrome:|chrome-extension:|moz-extension:|edge:|brave:|zen:|resource:|view-source:|devtools:)|^https:\/\/(addons\.mozilla\.org|chromewebstore\.google\.com|chrome\.google\.com\/webstore)/i;
+
+// The errors a browser raises when a command cannot reach the page. They say
+// nothing about why ("An unexpected error occurred" is all Firefox gives for
+// an unloaded tab), so the tab's state has to supply the reason.
+const UNREACHABLE_PAGE = /unexpected error|receiving end does not exist|could not establish connection|message (port|channel) closed|missing host permission|cannot access|cannot be scripted|no tab with id|invalid tab id|frame with id/i;
+
+// explainError turns a failed command into a message the agent can act on:
+// the original error, then what state the tab is in and which tool fixes it.
+// Without that, a bare browser error reads as "this browser is broken" and
+// the agent goes off to drive some other browser instead of retrying.
+async function explainError(e, params) {
+  const message = String(e?.message || e);
+  if (/What to do:/.test(message)) return message;
+  const tabId = params?.tabId;
+  if (!tabId) return message;
+  const hint = (text) => `${message}. What to do: ${text}`;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    return hint('this tab no longer exists (it was closed, or the browser restarted and renumbered its tabs). ' +
+      'Call list_tabs for current ids, or open_tab to get a fresh tab, then retry.');
+  }
+  if (tab.discarded) {
+    return hint('this tab is unloaded (the browser discarded it, or has not loaded it since startup), so there is no page to act on. ' +
+      'Call wake_tab with this tabId, then retry the same call. wake_tab does not bring the tab forward.');
+  }
+  if (UNSCRIPTABLE_URL.test(tab.url || '')) {
+    return hint(`this tab shows ${tab.url}, a browser-internal page that no extension can read or drive. ` +
+      'Use navigate to send the tab to a normal web page, or open_tab with the URL you need.');
+  }
+  if (!UNREACHABLE_PAGE.test(message)) return message;
+  if (tab.status !== 'complete') {
+    return hint('this tab is still loading. Call wake_tab with this tabId to wait for the page, then retry.');
+  }
+  return hint('the page in this tab did not answer, though the tab is open and loaded. ' +
+    'Call wake_tab with this tabId to check it; if it reports interactive:false, page_reload the tab and retry. ' +
+    'The browser connection itself is fine, so keep working in this browser.');
+}
+
+// tabInfo is the tab shape the tab-management commands report.
+function tabInfo(t) {
+  const info = {
+    id: t.id, title: t.title, url: t.url || t.pendingUrl,
+    active: t.active, windowId: t.windowId,
+    index: t.index, pinned: !!t.pinned,
+  };
+  if (t.discarded) info.discarded = true;
+  if (t.groupId != null && t.groupId !== -1) info.groupId = t.groupId;
+  return info;
+}
+
+// moveTabs places params.tabIds side by side, in the order given: the first
+// one goes right after `after`, right before `before`, or to `index` (-1 =
+// end of the strip), and each following tab lands right after the previous
+// one. Tabs are moved one at a time against freshly read positions, because
+// tabs.move with an array shifts indices underneath itself whenever a moved
+// tab started out left of the target.
+async function moveTabs(params) {
+  const ids = params.tabIds || [];
+  const moved = [];
+  const skipped = [];
+  let anchorId = params.after ?? params.before ?? null;
+  let placeBefore = params.after == null && params.before != null;
+  for (const id of ids) {
+    let tab;
+    try { tab = await chrome.tabs.get(id); } catch { skipped.push({ id, reason: 'not found' }); continue; }
+    try {
+      if (anchorId == null) {
+        const props = { index: params.index ?? -1 };
+        if (params.windowId != null) props.windowId = params.windowId;
+        await chrome.tabs.move(id, props);
+      } else if (anchorId !== id) {
+        const anchor = await chrome.tabs.get(anchorId);
+        // Taking a tab out from the left of the anchor slides the anchor one
+        // slot left, so the target index is computed for the strip without it.
+        const fromLeft = tab.windowId === anchor.windowId && tab.index < anchor.index;
+        const index = anchor.index + (placeBefore ? 0 : 1) - (fromLeft ? 1 : 0);
+        await chrome.tabs.move(id, { windowId: anchor.windowId, index });
+      }
+    } catch (e) {
+      skipped.push({ id, reason: String(e?.message || e) });
+      continue;
+    }
+    moved.push(id);
+    anchorId = id;
+    placeBefore = false;
+  }
+  // The browser clamps moves across the pinned/unpinned boundary without an
+  // error, so report where each tab actually ended up.
+  const tabs = [];
+  for (const id of moved) tabs.push(tabInfo(await chrome.tabs.get(id)));
+  return { tabs, skipped };
+}
+
+// wakeTab makes a background tab usable without bringing it forward. Browsers
+// unload idle tabs, and tabs restored at startup are not loaded until first
+// shown; either way the tab has no document, so every page command fails on
+// it. Reloading loads it in place: focus and window order are left alone.
+async function wakeTab(tabId, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || WAKE_TAB_TIMEOUT_MS);
+  let tab = await chrome.tabs.get(tabId);
+  const wasDiscarded = !!tab.discarded;
+  if (wasDiscarded) {
+    await chrome.tabs.reload(tabId);
+    const nudgeAt = Date.now() + WAKE_TAB_NUDGE_MS;
+    let nudged = false;
+    while (Date.now() < deadline) {
+      tab = await chrome.tabs.get(tabId);
+      if (!tab.discarded && tab.status === 'complete') break;
+      // Some builds ignore reload on a tab that was never loaded; setting its
+      // own URL again starts the load.
+      if (tab.discarded && !nudged && Date.now() >= nudgeAt && tab.url) {
+        nudged = true;
+        await chrome.tabs.update(tabId, { url: tab.url });
+      }
+      await new Promise(r => setTimeout(r, WAKE_TAB_POLL_MS));
+    }
+  } else if (tab.status !== 'complete') {
+    await waitForTabComplete(tabId, Math.max(0, deadline - Date.now()));
+    tab = await chrome.tabs.get(tabId);
+  }
+  const info = { ...tabInfo(tab), wasDiscarded, loaded: !tab.discarded && tab.status === 'complete' };
+  // Loaded is not the same as scriptable: browser pages, the add-on store and
+  // PDF viewers load fine but refuse content scripts.
+  info.interactive = false;
+  if (info.loaded) {
+    try {
+      await ensureContentScript(tabId);
+      await chrome.tabs.sendMessage(tabId, { action: 'ping' }, { frameId: 0 });
+      info.interactive = true;
+    } catch (e) {
+      info.reason = String(e?.message || e);
+    }
+  } else {
+    info.reason = tab.discarded ? 'still unloaded after waiting' : 'still loading after waiting';
+  }
+  return info;
 }
 
 // --- Ensure content script is injected ---
@@ -706,8 +862,13 @@ async function ensureDebugger(tabId) {
     throw new Error(
       'chrome.debugger is not available in this browser. ' +
       'On Firefox / Zen, trusted-input tools (cdp_click, cdp_type, cdp_key, ' +
-      'cdp_scroll, get_cookies, set_input_files) require a BiDi connection — ' +
-      'use launch_browser or connect_bidi to enable them.'
+      'cdp_scroll, get_cookies, set_input_files) require a BiDi connection. ' +
+      'What to do: use the content-script tools on this same tab instead — click, ' +
+      'type_text, fill_input, scroll — they work here without BiDi. If trusted ' +
+      'input is truly needed, connect_bidi attaches to this browser once the ' +
+      'user has started it with --remote-debugging-port. launch_browser opens a ' +
+      'separate empty profile without the user\'s tabs or logins, so it is not a ' +
+      'substitute.'
     );
   }
   const tid = await resolveTab(tabId);
@@ -1310,11 +1471,52 @@ async function dispatch(action, params) {
     case 'list_tabs': {
       const tabs = await chrome.tabs.query({});
       return tabs.map(t => ({
-        id: t.id, title: t.title, url: t.url,
-        active: t.active, windowId: t.windowId,
+        ...tabInfo(t),
         status: t.status, favIconUrl: t.favIconUrl,
       }));
     }
+
+    case 'open_tab': {
+      const props = { active: params.active !== false };
+      if (params.url) props.url = params.url;
+      if (params.nextTo) {
+        const anchor = await chrome.tabs.get(params.nextTo);
+        props.windowId = anchor.windowId;
+        props.index = anchor.index + 1;
+      }
+      const tab = await chrome.tabs.create(props);
+      let timedOut = false;
+      if (params.url && params.wait !== false) {
+        timedOut = (await waitForTabComplete(tab.id, OPEN_TAB_LOAD_TIMEOUT_MS)).timedOut;
+      }
+      const info = tabInfo(await chrome.tabs.get(tab.id));
+      if (timedOut) info.loadTimedOut = true;
+      return info;
+    }
+
+    case 'close_tabs': {
+      const closing = [];
+      const skipped = [];
+      for (const id of params.tabIds || []) {
+        let tab;
+        try { tab = await chrome.tabs.get(id); } catch { skipped.push({ id, reason: 'not found' }); continue; }
+        // Pinned tabs (Zen Essentials included) are long-lived by intent, so
+        // closing one takes an explicit opt-in.
+        if (tab.pinned && !params.includePinned) {
+          skipped.push({ id, reason: 'pinned', title: tab.title });
+          continue;
+        }
+        closing.push(tab);
+      }
+      if (closing.length) await chrome.tabs.remove(closing.map(t => t.id));
+      return { closed: closing.map(t => ({ id: t.id, title: t.title, url: t.url })), skipped };
+    }
+
+    case 'move_tabs':
+      return await moveTabs(params);
+
+    case 'wake_tab':
+      return await wakeTab(params.tabId, params.timeoutMs);
 
     case 'navigate': {
       const tid = await resolveTab(params.tabId);

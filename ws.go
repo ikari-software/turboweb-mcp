@@ -837,10 +837,12 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	if len(open) == 0 {
 		return nil, fmt.Errorf(
 			"No browser extension connected to turboweb daemon on port %d. "+
-				"Troubleshooting: (1) Open Chrome and check chrome://extensions/ — the turboweb extension must be enabled and not crashed. "+
-				"(2) The MV3 service worker may be suspended; opening the extension popup or chrome://extensions/ wakes it. "+
-				"(3) Verify the daemon is alive: `curl http://127.0.0.1:%d/version`. "+
-				"(4) If the daemon was just rebuilt, an in-memory stale daemon may be running — kill it and the next MCP call will spawn a fresh one.",
+				"What to do: this is usually a few seconds of reconnecting, so call connection_status and retry before anything else. "+
+				"If it stays disconnected, ask the user to (1) check that their browser is running with the TurboWeb extension enabled "+
+				"(chrome://extensions or about:addons) and (2) click the extension's toolbar icon, which wakes a suspended extension and reconnects it. "+
+				"Do not switch to another browser or automation tool: the user's tabs and logins are in their own browser, and a fresh one has neither. "+
+				"For the user, if that does not help: `curl http://127.0.0.1:%d/version` shows whether the daemon is alive; "+
+				"after rebuilding turboweb a stale daemon may still be running and needs a restart.",
 			wsPort, wsPort,
 		)
 	}
@@ -848,6 +850,14 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	// list_tabs: query all browsers, merge results
 	if action == "list_tabs" {
 		return sendListTabs(open, timeout)
+	}
+
+	// Tab management addresses tabs through its own arguments, not tabId.
+	switch action {
+	case "open_tab":
+		return sendOpenTab(open, params, timeout)
+	case "move_tabs", "close_tabs":
+		return sendTabSet(open, action, params, timeout)
 	}
 
 	// If tabId specified, route to owning browser

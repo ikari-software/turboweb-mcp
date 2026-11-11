@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // Tab IDs are only unique within one browser: Firefox and Zen can both have
@@ -89,10 +92,45 @@ func tabNum(v any) int {
 
 // tabIDParam declares the tabId argument every tab-scoped tool takes. It
 // accepts the string refs from list_tabs and, for one-browser setups and older
-// clients, plain numbers.
+// clients, plain numbers. addTool marks it required and guards the handler.
 func tabIDParam() mcp.ToolOption {
 	return mcp.WithAny("tabId",
-		mcp.Description(`Tab ID from list_tabs, e.g. "zen-3f9a1c2b:42" (omit for active tab)`),
+		mcp.Description(`Required. Tab ID from list_tabs or open_tab, e.g. "zen-3f9a1c2b:42"`),
 		func(schema map[string]any) { schema["type"] = []string{"string", "number"} },
 	)
+}
+
+// tabRefsParam declares an argument holding a list of tab IDs.
+func tabRefsParam(name, description string) mcp.ToolOption {
+	return mcp.WithArray(name,
+		mcp.Required(),
+		mcp.Description(description),
+		mcp.Items(map[string]any{"type": []string{"string", "number"}}),
+	)
+}
+
+// tabIDRequiredMessage is returned instead of running a tool that was called
+// without a tabId. Written for the model: it says where IDs come from and
+// that a retry will work.
+const tabIDRequiredMessage = "Refused: tabId is required. There is no implicit \"active tab\": " +
+	"the user keeps browsing while you work, so the focused tab is not a stable target. " +
+	"Call `list_tabs` to pick an existing tab, or `open_tab` to get a fresh one, " +
+	"then retry with that id as tabId (e.g. \"zen-3f9a1c2b:42\")."
+
+// requireTabID wraps a tool handler so it refuses to run without a usable
+// tabId. mcp-go does not enforce schema Required at the call layer, so the
+// schema alone would let a missing tabId fall through to the focused tab.
+func requireTabID(name string, h server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		v, present := req.GetArguments()["tabId"]
+		if !present || v == nil || v == "" {
+			logger.Printf("Refused %s: no tabId", name)
+			return mcp.NewToolResultError(tabIDRequiredMessage), nil
+		}
+		if _, id, ok := parseTabRef(v); !ok || id <= 0 {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"Invalid tabId %v: use an id from list_tabs or open_tab, e.g. \"zen-3f9a1c2b:42\"", v)), nil
+		}
+		return h(ctx, req)
+	}
 }
