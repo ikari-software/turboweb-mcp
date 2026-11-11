@@ -18,14 +18,27 @@ const hintMarker = "What to do:"
 // handed a bare "timeout" or "not found" tends to conclude the browser is
 // unusable and reach for a different one; naming the tool that fixes it keeps
 // the work in the user's own browser. First match wins.
+//
+// This table is the home for advice that follows from the message alone, so
+// errors elsewhere are raised bare. The one other author is explainError in
+// the extension, for advice that depends on the state of the tab (unloaded,
+// still loading, a browser-internal page), which only the extension can see.
 var errorHints = []struct {
 	match *regexp.Regexp
 	hint  string
 }{
-	{regexp.MustCompile(`(?i)bidi not connected|bidi connection closed|bidi dial failed`),
+	{regexp.MustCompile(`(?i)no browser extension connected`),
+		"this is usually a few seconds of reconnecting, so call connection_status and retry before anything else. " +
+			"If it stays disconnected, ask the user to (1) check that their browser is running with the TurboWeb extension enabled " +
+			"(chrome://extensions or about:addons) and (2) click the extension's toolbar icon, which wakes a suspended extension and reconnects it. " +
+			"Do not switch to another browser or automation tool: the user's tabs and logins are in their own browser, and a fresh one has neither. " +
+			"For the user, if that does not help: `curl http://127.0.0.1:<port>/version` shows whether the daemon is alive; " +
+			"after rebuilding turboweb a stale daemon may still be running and needs a restart."},
+	{regexp.MustCompile(`(?i)bidi not connected|bidi connection closed|bidi dial failed|chrome\.debugger is not available`),
 		"this tool needs WebDriver BiDi, which is not attached. The content-script tools (click, type_text, fill_input, " +
 			"scroll, extract_text, get_html, capture_page) work without it on the same tab, so use those. " +
-			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port."},
+			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port; " +
+			"launch_browser is not a substitute, since it opens an empty profile without the user's tabs or logins."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
 		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
 			"page_reload the tab, or open_tab with its URL and work in the new tab."},

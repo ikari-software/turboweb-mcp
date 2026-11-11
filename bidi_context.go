@@ -303,6 +303,20 @@ func getContextList() []map[string]any {
 	return out
 }
 
+// bidiTabList is list_tabs for a browser reachable over BiDi only: one entry
+// per top-level context, with the id resolveContext accepts as a tabId.
+func bidiTabList() []map[string]any {
+	var out []map[string]any
+	for _, c := range getContextList() {
+		id, ok := c["tabId"]
+		if !ok {
+			continue // a child frame, not a tab
+		}
+		out = append(out, map[string]any{"id": id, "url": c["url"], "via": "bidi"})
+	}
+	return out
+}
+
 func requireBiDiErr() error {
 	_, err := requireBiDi()
 	return err

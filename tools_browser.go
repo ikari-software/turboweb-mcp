@@ -539,6 +539,14 @@ func handleConnectionStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.Call
 func handleListTabs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	raw, err := send("list_tabs", nil)
 	if err != nil {
+		// A browser driven over BiDi alone (launch_browser on Firefox,
+		// connect_bidi without the extension) has no extension to list its
+		// tabs, yet every tool needs a tabId. List the BiDi contexts instead.
+		if getBiDi() != nil && refreshContextMap() == nil {
+			if tabs := bidiTabList(); len(tabs) > 0 {
+				return textResult(tabs)
+			}
+		}
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if getBiDi() != nil {

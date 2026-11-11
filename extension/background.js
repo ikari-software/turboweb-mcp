@@ -471,6 +471,8 @@ const REFUSES_SCRIPTS = /missing host permission|cannot access|cannot be scripte
 // the original error, then what state the tab is in and which tool fixes it.
 // Without that, a bare browser error reads as "this browser is broken" and
 // the agent goes off to drive some other browser instead of retrying.
+// Only advice that depends on the tab's state belongs here; advice that
+// follows from the message alone is added by the server (errhints.go).
 async function explainError(e, params, action) {
   const message = String(e?.message || e);
   if (/What to do:/.test(message)) return message;
@@ -909,13 +911,7 @@ async function ensureDebugger(tabId) {
     throw new Error(
       'chrome.debugger is not available in this browser. ' +
       'On Firefox / Zen, trusted-input tools (cdp_click, cdp_type, cdp_key, ' +
-      'cdp_scroll, get_cookies, set_input_files) require a BiDi connection. ' +
-      'What to do: use the content-script tools on this same tab instead — click, ' +
-      'type_text, fill_input, scroll — they work here without BiDi. If trusted ' +
-      'input is truly needed, connect_bidi attaches to this browser once the ' +
-      'user has started it with --remote-debugging-port. launch_browser opens a ' +
-      'separate empty profile without the user\'s tabs or logins, so it is not a ' +
-      'substitute.'
+      'cdp_scroll, get_cookies, set_input_files) require a BiDi connection.'
     );
   }
   const tid = await resolveTab(tabId);
