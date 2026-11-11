@@ -15,6 +15,15 @@ import (
 // them one at a time, re-reading positions before each move.
 const moveTabsTimeoutMs = 120000
 
+// wake_tab waits for a page load. The extension gets the wait itself; the
+// request gets that plus slack, so a load that runs to its limit is reported
+// by the extension rather than as a bare transport timeout.
+const (
+	wakeTabDefaultMs    = 20000
+	wakeTabMaxMs        = 120000
+	wakeTabReplySlackMs = 10000
+)
+
 func registerTabTools(s *server.MCPServer) {
 	// --- open_tab ---
 	addTool(s,
@@ -90,10 +99,12 @@ func handleWakeTab(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolRes
 	args := req.GetArguments()
 	wait := toInt(args["timeoutMs"])
 	if wait <= 0 {
-		wait = 20000
+		wait = wakeTabDefaultMs
 	}
+	wait = min(wait, wakeTabMaxMs)
+	args["timeoutMs"] = wait // the extension waits exactly as long as we allow for
 	// Leave the extension room to report a load that ran to its own timeout.
-	raw, err := send("wake_tab", rawArgs(args), wait+10000)
+	raw, err := send("wake_tab", rawArgs(args), wait+wakeTabReplySlackMs)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -165,10 +176,13 @@ func browserForRef(open []*BrowserConnection, v any, timeout int) (*BrowserConne
 			found = owners(open, id)
 		}
 	}
-	if len(found) != 1 {
-		return nil, 0, fmt.Errorf("Tab %d is ambiguous across %d connected browsers: pass the full id from list_tabs", id, len(open))
+	switch len(found) {
+	case 0:
+		return nil, 0, fmt.Errorf("Tab %d not found in any connected browser", id)
+	case 1:
+		return found[0], id, nil
 	}
-	return found[0], id, nil
+	return nil, 0, fmt.Errorf("Tab %d is ambiguous across %d connected browsers: pass the full id from list_tabs", id, len(open))
 }
 
 // browserByName picks the browser for a tab that does not exist yet.

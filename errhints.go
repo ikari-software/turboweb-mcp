@@ -26,16 +26,22 @@ var errorHints = []struct {
 		"this tool needs WebDriver BiDi, which is not attached. The content-script tools (click, type_text, fill_input, " +
 			"scroll, extract_text, get_html, capture_page) work without it on the same tab, so use those. " +
 			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port."},
+	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
+		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
+			"page_reload the tab, or open_tab with its URL and work in the new tab."},
+	{regexp.MustCompile(`(?i)^timeout after \d+ms: (move_tabs|close_tabs|open_tab)`),
+		"the reply was lost, but the browser may have done part or all of the work. Call list_tabs to see the " +
+			"current state before retrying: a blind retry can open a duplicate tab or repeat a move."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms`),
 		"the browser did not answer in time, which usually means the tab is unloaded, still loading, or busy. " +
 			"If the call targets a tab, call wake_tab with the same tabId and retry; connection_status shows whether the browser is still connected."},
-	{regexp.MustCompile(`(?i)not connected to daemon|relay write error|websocket write error|connection (was )?closed|browser disconnected`),
+	{regexp.MustCompile(`(?i)not connected to daemon|relay write error|websocket write error|connection (was )?closed`),
 		"the link to the browser dropped and reconnects by itself within a few seconds. " +
 			"Call connection_status, then retry the same call. The user's browser and its tabs are unaffected."},
 	{regexp.MustCompile(`(?i)tab \d+ not found in any connected browser|no bidi context for tab|no tab with id|invalid tab id`),
 		"that tab id is stale (the tab was closed, or the browser restarted and renumbered its tabs). " +
 			"Call list_tabs for current ids, or open_tab to get a fresh tab, then retry."},
-	{regexp.MustCompile(`(?i)no element matches selector|matched no <iframe>|selector .* (not found|matched nothing)|element not found`),
+	{regexp.MustCompile(`(?i)no element matches selector|matched no <iframe>|element not found`),
 		"the selector does not match the page as it is now. Look before retrying: get_interactive_map lists what can be " +
 			"clicked with working selectors, find_text locates visible text, and list_frames shows whether the target sits inside a frame."},
 	{regexp.MustCompile(`(?i)content security policy|unsafe-eval|\bCSP\b`),
@@ -44,7 +50,7 @@ var errorHints = []struct {
 	{regexp.MustCompile(`(?i)browser not found|failed to launch browser|no connection established within`),
 		"a separate browser could not be started, and one is rarely needed: the user's own browser is driven through the " +
 			"extension. Call connection_status and list_tabs to work in it."},
-	{regexp.MustCompile(`(?i)captureVisibleTab|cannot capture|not in the foreground`),
+	{regexp.MustCompile(`(?i)captureVisibleTab`),
 		"a screenshot needs the tab to be the visible one in its window. For a tab in the background, read it with " +
 			"extract_text, get_html or capture_page instead, which need no focus (call wake_tab first if it is unloaded)."},
 }

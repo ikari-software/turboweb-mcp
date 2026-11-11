@@ -194,6 +194,26 @@ func TestMoveTabs_RefusesAmbiguousBareID(t *testing.T) {
 	})
 }
 
+func TestCloseTabs_BareIDAcrossTwoBrowsers(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
+		for id, want := range map[int]string{
+			999: "Tab 999 not found in any connected browser", // nobody has it
+			7:   "ambiguous",                                  // both have it
+		} {
+			res, err := handleCloseTabs(context.Background(), reqWith(map[string]any{"tabIds": []any{id}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.IsError || !strings.Contains(extractText(t, res), want) {
+				t.Errorf("close_tabs %d: got %s; want an error containing %q", id, extractText(t, res), want)
+			}
+		}
+		if zen.params("close_tabs") != nil || ff.params("close_tabs") != nil {
+			t.Error("no browser should have been asked to close anything")
+		}
+	})
+}
+
 func TestCloseTabs_RewritesClosedAndSkippedIDs(t *testing.T) {
 	withZenAndFirefox(t, func(_, ff *tabBrowser, _, ffPrefix string) {
 		res, err := handleCloseTabs(context.Background(), reqWith(map[string]any{

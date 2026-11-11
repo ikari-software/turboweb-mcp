@@ -212,26 +212,47 @@ function forceReconnect(reason) {
 // --- Browser instance identity ---
 // Tab IDs are only unique within one browser, so the server prefixes them
 // with this per-profile ID to tell Firefox's tab 122 from Zen's tab 122.
-// Minted once and kept in storage.local, so it survives restarts and
-// reconnects; it changes only if the extension's storage is wiped.
+// It has two parts. The profile part is minted once and kept in
+// storage.local. The session part lives in storage.session, which the browser
+// empties when it restarts: a restart renumbers tabs, so an ID handed out
+// before it would otherwise name whatever tab holds that number now. With the
+// session part mixed in, old IDs stop matching this browser at all.
 let instanceIdPromise = null;
 function getInstanceId() {
   if (!instanceIdPromise) {
     instanceIdPromise = (async () => {
-      try {
-        const got = await chrome.storage.local.get('instanceId');
-        if (got && got.instanceId) return got.instanceId;
-        const id = crypto.randomUUID();
-        await chrome.storage.local.set({ instanceId: id });
-        return id;
-      } catch (_) {
-        // No storage: the extension's own origin is per-profile on Firefox,
-        // though shared by every profile on Chrome.
-        return chrome.runtime.getURL('');
-      }
+      const profile = await getProfileId();
+      const session = await getSessionId();
+      return session ? `${profile}#${session}` : profile;
     })();
   }
   return instanceIdPromise;
+}
+
+async function getProfileId() {
+  try {
+    const got = await chrome.storage.local.get('instanceId');
+    if (got && got.instanceId) return got.instanceId;
+    const id = crypto.randomUUID();
+    await chrome.storage.local.set({ instanceId: id });
+    return id;
+  } catch (_) {
+    // No storage: the extension's own origin is per-profile on Firefox,
+    // though shared by every profile on Chrome.
+    return chrome.runtime.getURL('');
+  }
+}
+
+async function getSessionId() {
+  try {
+    const got = await chrome.storage.session.get('sessionId');
+    if (got && got.sessionId) return got.sessionId;
+    const id = crypto.randomUUID();
+    await chrome.storage.session.set({ sessionId: id });
+    return id;
+  } catch (_) {
+    return ''; // no session storage: IDs stay stable across restarts, as before
+  }
 }
 
 // --- WebSocket connection with auto-reconnect ---
@@ -387,7 +408,7 @@ function connect() {
       stats.errors++;
       // Tell the overlay so the cursor can shake + flash red.
       notifyOverlay(params.tabId, { kind: 'error', id: cmdId, action: msg.action, error: e.message });
-      const error = await explainError(e, params);
+      const error = await explainError(e, params, msg.action);
       logActivity({
         ...baseEntry,
         status: 'error',
@@ -443,11 +464,14 @@ const UNSCRIPTABLE_URL = /^(about:(?!blank|srcdoc)|chrome:|chrome-extension:|moz
 // an unloaded tab), so the tab's state has to supply the reason.
 const UNREACHABLE_PAGE = /unexpected error|receiving end does not exist|could not establish connection|message (port|channel) closed|missing host permission|cannot access|cannot be scripted|no tab with id|invalid tab id|frame with id/i;
 
+// The subset of those that is permanent for the page: no reload fixes it.
+const REFUSES_SCRIPTS = /missing host permission|cannot access|cannot be scripted/i;
+
 // explainError turns a failed command into a message the agent can act on:
 // the original error, then what state the tab is in and which tool fixes it.
 // Without that, a bare browser error reads as "this browser is broken" and
 // the agent goes off to drive some other browser instead of retrying.
-async function explainError(e, params) {
+async function explainError(e, params, action) {
   const message = String(e?.message || e);
   if (/What to do:/.test(message)) return message;
   const tabId = params?.tabId;
@@ -460,6 +484,10 @@ async function explainError(e, params) {
     return hint('this tab no longer exists (it was closed, or the browser restarted and renumbered its tabs). ' +
       'Call list_tabs for current ids, or open_tab to get a fresh tab, then retry.');
   }
+  if (tab.discarded && action === 'wake_tab') {
+    return hint('wake_tab could not load this tab, so calling it again will not help. ' +
+      `Call open_tab with its URL (${tab.url}) and work in the new tab.`);
+  }
   if (tab.discarded) {
     return hint('this tab is unloaded (the browser discarded it, or has not loaded it since startup), so there is no page to act on. ' +
       'Call wake_tab with this tabId, then retry the same call. wake_tab does not bring the tab forward.');
@@ -469,6 +497,10 @@ async function explainError(e, params) {
       'Use navigate to send the tab to a normal web page, or open_tab with the URL you need.');
   }
   if (!UNREACHABLE_PAGE.test(message)) return message;
+  if (REFUSES_SCRIPTS.test(message)) {
+    return hint('the browser does not let extensions read or drive this page (a PDF viewer, a local file, or a protected site), ' +
+      'and reloading will not change that. Use screenshot to look at it, or open_tab with a page you can work on.');
+  }
   if (tab.status !== 'complete') {
     return hint('this tab is still loading. Call wake_tab with this tabId to wait for the page, then retry.');
   }
@@ -516,6 +548,15 @@ async function moveTabs(params) {
         const fromLeft = tab.windowId === anchor.windowId && tab.index < anchor.index;
         const index = anchor.index + (placeBefore ? 0 : 1) - (fromLeft ? 1 : 0);
         await chrome.tabs.move(id, { windowId: anchor.windowId, index });
+        // A move that would mix pinned and unpinned tabs is clamped or ignored
+        // without an error. Such a tab must not become the anchor, or every
+        // tab after it follows it to the wrong place.
+        const [now, anchorNow] = [await chrome.tabs.get(id), await chrome.tabs.get(anchorId)];
+        const wanted = anchorNow.index + (placeBefore ? -1 : 1);
+        if (now.windowId !== anchorNow.windowId || now.index !== wanted) {
+          skipped.push({ id, reason: `the browser left it at index ${now.index}: pinned and unpinned tabs cannot be mixed` });
+          continue;
+        }
       }
     } catch (e) {
       skipped.push({ id, reason: String(e?.message || e) });
@@ -525,10 +566,16 @@ async function moveTabs(params) {
     anchorId = id;
     placeBefore = false;
   }
-  // The browser clamps moves across the pinned/unpinned boundary without an
-  // error, so report where each tab actually ended up.
+  // Report where each tab actually ended up. One that was closed meanwhile
+  // must not cost the caller the result for the rest.
   const tabs = [];
-  for (const id of moved) tabs.push(tabInfo(await chrome.tabs.get(id)));
+  for (const id of moved) {
+    try {
+      tabs.push(tabInfo(await chrome.tabs.get(id)));
+    } catch {
+      skipped.push({ id, reason: 'closed before its final position was read' });
+    }
+  }
   return { tabs, skipped };
 }
 
@@ -1406,7 +1453,7 @@ async function executeJsMain(tabId, code) {
       return { result: r?.value ?? null };
     } catch (cdpErr) {
       // CDP not available (Firefox) — return the original CSP error with a hint
-      return { error: out.error, hint: 'Page CSP blocks eval. On Firefox/Zen use BiDi (launch_browser) to enable CDP for this fallback.' };
+      return { error: out.error, hint: 'Page CSP blocks eval. Use the tools that do not evaluate code in the page (click, type_text, fill_input, extract_text, get_html, query_elements) on this same tab.' };
     }
   }
 
