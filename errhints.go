@@ -37,7 +37,8 @@ var errorHints = []struct {
 	{regexp.MustCompile(`(?i)bidi not connected|bidi connection closed|bidi dial failed|chrome\.debugger is not available`),
 		"this tool needs WebDriver BiDi, which is not attached. The content-script tools (click, type_text, fill_input, " +
 			"scroll, extract_text, get_html, capture_page) work without it on the same tab, so use those. " +
-			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port; " +
+			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port " +
+			"(on Firefox/Zen that changes the profile's settings unless `remote.prefs.recommended` is false: read connect_bidi's description first); " +
 			"launch_browser is not a substitute, since it opens an empty profile without the user's tabs or logins."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
 		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
