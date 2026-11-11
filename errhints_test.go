@@ -13,12 +13,22 @@ func TestHintFor(t *testing.T) {
 	for _, c := range []struct{ msg, want string }{
 		{"timeout after 30000ms: extract_text", "wake_tab"},
 		{"timeout after 30000ms: click (via relay)", "wake_tab"},
+		{"timeout after 30000ms: wake_tab", "page_reload"},
+		{"timeout after 120000ms: move_tabs (via relay)", "before retrying"},
+		{"timeout after 30000ms: close_tabs", "before retrying"},
+		{"timeout after 30000ms: open_tab", "duplicate tab"},
+		{"relay write error: broken pipe", "connection_status"},
+		{"No tab with id: 7", "list_tabs"},
+		{"frame \"#x\" matched no <iframe>", "list_frames"},
+		{"Error: tabs.captureVisibleTab failed", "extract_text"},
 		{"Not connected to daemon. Waiting for reconnect.", "connection_status"},
 		{"Tab 42 not found in any connected browser", "list_tabs"},
 		{"BiDi connection closed", "content-script tools"},
 		{"No element matches selector: #go", "get_interactive_map"},
 		{"Refused to evaluate: violates Content Security Policy", "page_capabilities"},
 		{"browser launched but no connection established within 10s", "user's own browser"},
+		{"No browser extension connected to turboweb daemon on port 18321", "Do not switch to another browser"},
+		{"chrome.debugger is not available in this browser. On Firefox / Zen, trusted-input tools require a BiDi connection.", "content-script tools"},
 		// Already explained by the extension, or nothing specific to add.
 		{"An unexpected error occurred. What to do: call wake_tab", ""},
 		{"files: empty array", ""},
@@ -40,13 +50,12 @@ func TestNoBrowserError_SaysToStayInTheUsersBrowser(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error with no browser connected")
 	}
-	for _, want := range []string{hintMarker, "connection_status", "Do not switch to another browser"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error should contain %q, got: %s", want, err)
+	// The advice comes from the hint table, so it is written in one place.
+	hint := hintFor(err.Error())
+	for _, want := range []string{"connection_status", "Do not switch to another browser"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("hint should contain %q, got: %s", want, hint)
 		}
-	}
-	if hintFor(err.Error()) != "" {
-		t.Error("an error that carries its own advice should not get a second hint")
 	}
 }
 

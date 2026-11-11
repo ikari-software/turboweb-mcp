@@ -67,7 +67,7 @@ func setBiDi(c *BiDiClient) {
 func requireBiDi() (*BiDiClient, error) {
 	c := getBiDi()
 	if c == nil {
-		return nil, errors.New("BiDi not connected. Launch browser with --remote-debugging-port or call launch_browser.")
+		return nil, errors.New("BiDi not connected.")
 	}
 	return c, nil
 }

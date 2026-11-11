@@ -99,6 +99,8 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 				"closed":  []map[string]any{{"id": 7}},
 				"skipped": []map[string]any{{"id": 8, "reason": "pinned"}},
 			}}
+		case "wake_tab":
+			return map[string]any{"result": map[string]any{"id": params["tabId"], "loaded": true, "interactive": true}}
 		case "move_tabs":
 			return map[string]any{"result": map[string]any{
 				"tabs": []map[string]any{{"id": 8, "index": 0}, {"id": 7, "index": 1}},
@@ -194,6 +196,26 @@ func TestMoveTabs_RefusesAmbiguousBareID(t *testing.T) {
 	})
 }
 
+func TestCloseTabs_BareIDAcrossTwoBrowsers(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
+		for id, want := range map[int]string{
+			999: "Tab 999 not found in any connected browser", // nobody has it
+			7:   "ambiguous",                                  // both have it
+		} {
+			res, err := handleCloseTabs(context.Background(), reqWith(map[string]any{"tabIds": []any{id}}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.IsError || !strings.Contains(extractText(t, res), want) {
+				t.Errorf("close_tabs %d: got %s; want an error containing %q", id, extractText(t, res), want)
+			}
+		}
+		if zen.params("close_tabs") != nil || ff.params("close_tabs") != nil {
+			t.Error("no browser should have been asked to close anything")
+		}
+	})
+}
+
 func TestCloseTabs_RewritesClosedAndSkippedIDs(t *testing.T) {
 	withZenAndFirefox(t, func(_, ff *tabBrowser, _, ffPrefix string) {
 		res, err := handleCloseTabs(context.Background(), reqWith(map[string]any{
@@ -259,4 +281,120 @@ func TestOpenTab_PicksBrowserAndReturnsUsableID(t *testing.T) {
 			t.Errorf("click reached Firefox with %v", ff.params("click"))
 		}
 	})
+}
+
+func TestMoveTabs_RefusesAfterTogetherWithBefore(t *testing.T) {
+	withZenAndFirefox(t, func(zen, _ *tabBrowser, zenPrefix, _ string) {
+		res, _ := handleMoveTabs(context.Background(), reqWith(map[string]any{
+			"tabIds": []any{zenPrefix + ":8"}, "after": zenPrefix + ":7", "before": zenPrefix + ":7",
+		}))
+		if !res.IsError || !strings.Contains(extractText(t, res), "either after or before") {
+			t.Errorf("got %q", extractText(t, res))
+		}
+		if zen.params("move_tabs") != nil {
+			t.Error("nothing should be moved when the call is refused")
+		}
+	})
+}
+
+func TestMoveTabs_RefusesAnchorInAnotherBrowser(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, ffPrefix string) {
+		res, _ := handleMoveTabs(context.Background(), reqWith(map[string]any{
+			"tabIds": []any{zenPrefix + ":8"}, "after": ffPrefix + ":9",
+		}))
+		if !res.IsError || !strings.Contains(extractText(t, res), "one browser per call") {
+			t.Errorf("got %q", extractText(t, res))
+		}
+		if zen.params("move_tabs") != nil || ff.params("move_tabs") != nil {
+			t.Error("nothing should be moved when the call is refused")
+		}
+	})
+}
+
+func TestTabTools_RefuseABrowserThatIsNotConnected(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, ffPrefix string) {
+		res, _ := handleCloseTabs(context.Background(), reqWith(map[string]any{"tabIds": []any{"zen-deadbeef:7"}}))
+		if !res.IsError || !strings.Contains(extractText(t, res), "that browser is not connected") {
+			t.Errorf("close_tabs: got %q", extractText(t, res))
+		}
+		if zen.params("close_tabs") != nil || ff.params("close_tabs") != nil {
+			t.Error("no browser should have been asked to close anything")
+		}
+
+		res, _ = handleOpenTab(context.Background(), reqWith(map[string]any{"browser": "Safari"}))
+		text := extractText(t, res)
+		if !res.IsError || !strings.Contains(text, `No connected browser matches "safari"`) ||
+			!strings.Contains(text, zenPrefix) || !strings.Contains(text, ffPrefix) {
+			t.Errorf("open_tab: got %q", text)
+		}
+	})
+}
+
+// A closed tab leaves the owner cache, so its number stops counting towards
+// "which browser has tab 7".
+func TestCloseTabs_ForgetsTheClosedTab(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, ffPrefix string) {
+		if _, err := send("list_tabs", nil, 5000); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handleCloseTabs(context.Background(), reqWith(map[string]any{"tabIds": []any{ffPrefix + ":7"}})); err != nil {
+			t.Fatal(err)
+		}
+		res, _ := handleMoveTabs(context.Background(), reqWith(map[string]any{"tabIds": []any{float64(7)}}))
+		if res.IsError || zen.params("move_tabs") == nil || ff.params("move_tabs") != nil {
+			t.Errorf("bare 7 should now mean Zen's tab, got %q", extractText(t, res))
+		}
+	})
+}
+
+func TestWakeTab_ForwardsTheWaitAndReturnsTheCallersRef(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, _ string) {
+		for _, c := range []struct {
+			args map[string]any
+			want int
+		}{
+			{map[string]any{}, wakeTabDefaultMs},
+			{map[string]any{"timeoutMs": float64(5000)}, 5000},
+			{map[string]any{"timeoutMs": float64(9999999)}, wakeTabMaxMs},
+			{map[string]any{"timeoutMs": float64(-1)}, wakeTabDefaultMs},
+		} {
+			c.args["tabId"] = zenPrefix + ":8"
+			res, err := handleWakeTab(context.Background(), reqWith(c.args))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := zen.params("wake_tab")
+			if toInt(got["tabId"]) != 8 || toInt(got["timeoutMs"]) != c.want {
+				t.Errorf("Zen received tabId=%v timeoutMs=%v; want 8 and %d", got["tabId"], got["timeoutMs"], c.want)
+			}
+			if text := extractText(t, res); res.IsError || !strings.Contains(text, `"`+zenPrefix+`:8"`) {
+				t.Errorf("result should carry the ref the caller used, got %s", text)
+			}
+		}
+		if ff.params("wake_tab") != nil {
+			t.Error("wake_tab for a Zen tab reached Firefox")
+		}
+	})
+}
+
+func TestBidiTabList_ListsTopLevelContextsWithUsableIDs(t *testing.T) {
+	applyContextTree([]BiDiContextInfo{
+		{Context: "ctx-a", URL: "https://a.example/", Children: []BiDiContextInfo{{Context: "frame-1", URL: "https://ads.example/"}}},
+		{Context: "ctx-b", URL: "https://b.example/"},
+	})
+	defer applyContextTree(nil)
+
+	tabs := bidiTabList()
+	if len(tabs) != 2 {
+		t.Fatalf("want the 2 top-level contexts and no frames, got %v", tabs)
+	}
+	for _, tab := range tabs {
+		// The id has to pass the tabId guard and lead back to the context.
+		contextMapMu.RLock()
+		ctx := tabToContext[toInt(tab["id"])]
+		contextMapMu.RUnlock()
+		if _, id, ok := parseTabRef(tab["id"]); !ok || id <= 0 || contextURLs[ctx] != tab["url"] {
+			t.Errorf("tab %v does not resolve to its own context (got %q)", tab, ctx)
+		}
+	}
 }

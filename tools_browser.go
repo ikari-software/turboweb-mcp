@@ -16,7 +16,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- launch_browser ---
 	addTool(s,
 		mcp.NewTool("launch_browser",
-			mcp.WithDescription("Launch a new Chrome instance with stealth flags (--silent-debugger-extension-api to hide the debugging infobar). Auto-loads the extension. Uses a dedicated profile so it won't affect your main browser."),
+			mcp.WithDescription("Last resort: starts a SEPARATE Chrome with an empty profile, without any of the user's tabs or logins. To work in the user's own browser use list_tabs / open_tab instead. Launches Chrome with stealth flags (--silent-debugger-extension-api to hide the debugging infobar). Auto-loads the extension. Uses a dedicated profile so it won't affect your main browser."),
 			mcp.WithBoolean("headless", mcp.Description("Launch in headless mode (default false)")),
 		),
 		handleLaunchBrowser,
@@ -539,6 +539,14 @@ func handleConnectionStatus(_ context.Context, _ mcp.CallToolRequest) (*mcp.Call
 func handleListTabs(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	raw, err := send("list_tabs", nil)
 	if err != nil {
+		// A browser driven over BiDi alone (launch_browser on Firefox,
+		// connect_bidi without the extension) has no extension to list its
+		// tabs, yet every tool needs a tabId. List the BiDi contexts instead.
+		if getBiDi() != nil && refreshContextMap() == nil {
+			if tabs := bidiTabList(); len(tabs) > 0 {
+				return textResult(tabs)
+			}
+		}
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if getBiDi() != nil {

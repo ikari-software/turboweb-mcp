@@ -52,7 +52,7 @@ beforeAll(() => {
     'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll', 'humanGapMs', 'DEFAULT_TYPE_WPM',
     'setInputFiles', 'interceptFileChooser',
     'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
-    'executeJsMain', 'adaptScript', 'dispatch', 'explainError',
+    'executeJsMain', 'adaptScript', 'dispatch', 'explainError', 'getSessionId',
     'PAGE_ACTIONS_THAT_GATE_ON_CURSOR',
   ].join(', ');
 
@@ -765,22 +765,57 @@ describe('dispatch', () => {
 
   // A tab strip the tabs.get/move mocks read and reorder, so move_tabs is
   // checked against where tabs end up rather than against the calls it makes.
-  function mockStrip(ids, pinned = []) {
-    let strip = [...ids];
+  function mockStrip(ids, pinned = [], otherWindow = []) {
+    // Window 1 holds `ids`, window 2 holds `otherWindow`.
+    const wins = { 1: [...ids], 2: [...otherWindow] };
+    const windowOf = (id) => Object.keys(wins).map(Number).find(w => wins[w].includes(id));
     chrome.tabs.get.mockReset().mockImplementation(async (id) => {
-      const index = strip.indexOf(id);
-      if (index < 0) throw new Error(`No tab with id: ${id}`);
-      return { id, index, windowId: 1, title: `T${id}`, url: `https://t/${id}`, pinned: pinned.includes(id) };
+      const windowId = windowOf(id);
+      if (!windowId) throw new Error(`No tab with id: ${id}`);
+      return { id, index: wins[windowId].indexOf(id), windowId, title: `T${id}`, url: `https://t/${id}`, pinned: pinned.includes(id) };
     });
-    chrome.tabs.move.mockReset().mockImplementation(async (id, { index }) => {
-      strip = strip.filter(t => t !== id);
-      strip.splice(index < 0 ? strip.length : index, 0, id);
+    chrome.tabs.move.mockReset().mockImplementation(async (id, { index, windowId }) => {
+      const from = windowOf(id);
+      const to = windowId ?? from;
+      const before = { ...wins };
+      wins[from] = wins[from].filter(t => t !== id);
+      const target = [...wins[to]];
+      target.splice(index < 0 ? target.length : index, 0, id);
+      wins[to] = target;
+      // Like Firefox, quietly ignore a move that would put a pinned tab
+      // after an unpinned one.
+      const flags = wins[to].map(t => pinned.includes(t));
+      if (flags.some((p, i) => p && i > 0 && !flags[i - 1])) Object.assign(wins, before);
     });
     chrome.tabs.remove.mockReset().mockImplementation(async (gone) => {
-      strip = strip.filter(t => !gone.includes(t));
+      for (const w of Object.keys(wins)) wins[w] = wins[w].filter(t => !gone.includes(t));
     });
-    return () => strip;
+    return (windowId = 1) => wins[windowId];
   }
+
+  it('move_tabs — moves tabs next to an anchor in another window', async () => {
+    const strip = mockStrip([1, 2, 3], [], [7, 8]);
+    const result = await api.dispatch('move_tabs', { tabIds: [3, 1], after: 7 });
+    expect(strip(1)).toEqual([2]);
+    expect(strip(2)).toEqual([7, 3, 1, 8]);
+    expect(result.tabs).toMatchObject([{ id: 3, windowId: 2, index: 1 }, { id: 1, windowId: 2, index: 2 }]);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it('move_tabs — places tabs before an anchor in another window', async () => {
+    const strip = mockStrip([1, 2, 3], [], [7, 8]);
+    await api.dispatch('move_tabs', { tabIds: [1, 2], before: 8 });
+    expect(strip(1)).toEqual([3]);
+    expect(strip(2)).toEqual([7, 1, 2, 8]);
+  });
+
+  it('move_tabs — sends tabs to an index in the window named by windowId', async () => {
+    const strip = mockStrip([1, 2, 3], [], [7, 8]);
+    const result = await api.dispatch('move_tabs', { tabIds: [2], index: 0, windowId: 2 });
+    expect(strip(1)).toEqual([1, 3]);
+    expect(strip(2)).toEqual([2, 7, 8]);
+    expect(result.tabs).toMatchObject([{ id: 2, windowId: 2, index: 0 }]);
+  });
 
   it('list_tabs — reports strip position and pinned state', async () => {
     chrome.tabs.query.mockResolvedValue([
@@ -820,6 +855,28 @@ describe('dispatch', () => {
     const result = await api.dispatch('move_tabs', { tabIds: [9, 1] });
     expect(strip()).toEqual([2, 3, 1]);
     expect(result.skipped).toEqual([{ id: 9, reason: 'not found' }]);
+  });
+
+  it('move_tabs — does not chain later tabs off one the browser refused to move', async () => {
+    const strip = mockStrip([9, 1, 2, 3], [9]);
+    const result = await api.dispatch('move_tabs', { tabIds: [1, 9, 2, 3] });
+    expect(strip()).toEqual([9, 1, 2, 3]);
+    expect(result.tabs.map(t => t.id)).toEqual([1, 2, 3]);
+    expect(result.skipped).toEqual([{ id: 9, reason: expect.stringMatching(/left it at index 0/) }]);
+  });
+
+  it('move_tabs — still reports the rest when a moved tab closes before the read-back', async () => {
+    mockStrip([1, 2, 3]);
+    const get = chrome.tabs.get.getMockImplementation();
+    let seen = 0;
+    chrome.tabs.get.mockImplementation(async (id) => {
+      // Tab 1 is read twice while it is being placed; the third read is the read-back.
+      if (id === 1 && ++seen > 2) throw new Error('No tab with id: 1');
+      return get(id);
+    });
+    const result = await api.dispatch('move_tabs', { tabIds: [2, 1] });
+    expect(result.tabs.map(t => t.id)).toEqual([2]);
+    expect(result.skipped).toEqual([{ id: 1, reason: 'closed before its final position was read' }]);
   });
 
   it('close_tabs — closes tabs but leaves pinned ones', async () => {
@@ -884,11 +941,108 @@ describe('dispatch', () => {
     expect(result).toMatchObject({ loaded: false, interactive: false, reason: 'still unloaded after waiting' });
   });
 
+  it('wake_tab — sets the URL again when reload leaves the tab unloaded', async () => {
+    vi.useFakeTimers();
+    try {
+      let state = { id: 4, index: 0, windowId: 1, url: 'https://a.com', discarded: true, status: 'complete' };
+      chrome.tabs.get.mockReset().mockImplementation(async () => ({ ...state }));
+      chrome.tabs.reload.mockReset().mockResolvedValue(undefined); // ignored by the browser
+      chrome.tabs.update.mockReset().mockImplementation(async () => {
+        state = { ...state, discarded: false, status: 'complete' };
+      });
+      chrome.tabs.sendMessage.mockResolvedValue({ pong: true });
+      const pending = api.dispatch('wake_tab', { tabId: 4 });
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(chrome.tabs.update).not.toHaveBeenCalled(); // reload gets its chance first
+      await vi.advanceTimersByTimeAsync(1500);
+      const result = await pending;
+      expect(chrome.tabs.update).toHaveBeenCalledTimes(1);
+      expect(chrome.tabs.update).toHaveBeenCalledWith(4, { url: 'https://a.com' });
+      expect(result).toMatchObject({ wasDiscarded: true, loaded: true, interactive: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('wake_tab — waits for a tab that is still loading', async () => {
+    let state = { id: 4, index: 0, windowId: 1, url: 'https://a.com', status: 'loading' };
+    chrome.tabs.get.mockReset().mockImplementation(async () => ({ ...state }));
+    chrome.tabs.reload.mockReset();
+    chrome.tabs.sendMessage.mockResolvedValue({ pong: true });
+    const pending = api.dispatch('wake_tab', { tabId: 4 });
+    await vi.waitFor(() => expect(chrome.tabs.onUpdated.addListener).toHaveBeenCalled());
+    state = { ...state, status: 'complete' };
+    chrome.tabs.onUpdated.addListener.mock.lastCall[0](4, { status: 'complete' });
+    const result = await pending;
+    expect(chrome.tabs.reload).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ wasDiscarded: false, loaded: true, interactive: true });
+  });
+
+  it('wake_tab — reports a tab that is still loading at the deadline', async () => {
+    chrome.tabs.get.mockReset().mockResolvedValue({ id: 4, index: 0, windowId: 1, url: 'https://a.com', status: 'loading' });
+    const result = await api.dispatch('wake_tab', { tabId: 4, timeoutMs: 50 });
+    expect(result).toMatchObject({ loaded: false, interactive: false, reason: 'still loading after waiting' });
+  });
+
+  it('open_tab — waits for the page and flags a load that timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      chrome.tabs.create.mockReset().mockResolvedValue({ id: 3 });
+      chrome.tabs.get.mockReset().mockResolvedValue({ id: 3, index: 0, windowId: 1, url: 'https://slow.example/', status: 'loading' });
+      const pending = api.dispatch('open_tab', { url: 'https://slow.example/' });
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(await pending).toMatchObject({ id: 3, loadTimedOut: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('open_tab — returns at once with wait:false, and for a loaded page without a flag', async () => {
+    chrome.tabs.create.mockReset().mockResolvedValue({ id: 3 });
+    chrome.tabs.get.mockReset().mockResolvedValue({ id: 3, index: 0, windowId: 1, url: 'https://a.com', status: 'loading' });
+    const added = chrome.tabs.onUpdated.addListener.mock.calls.length;
+    const result = await api.dispatch('open_tab', { url: 'https://a.com', wait: false });
+    expect(chrome.tabs.onUpdated.addListener.mock.calls.length).toBe(added); // did not wait
+    expect(result).not.toHaveProperty('loadTimedOut');
+
+    chrome.tabs.get.mockResolvedValue({ id: 3, index: 0, windowId: 1, url: 'https://a.com', status: 'complete' });
+    expect(await api.dispatch('open_tab', { url: 'https://a.com' })).not.toHaveProperty('loadTimedOut');
+  });
+
   it('explainError — points an unloaded tab at wake_tab', async () => {
     chrome.tabs.get.mockResolvedValue({ id: 4, discarded: true, url: 'https://a.com', status: 'complete' });
     const msg = await api.explainError(new Error('An unexpected error occurred'), { tabId: 4 });
     expect(msg).toMatch(/^An unexpected error occurred\. What to do: this tab is unloaded/);
     expect(msg).toMatch(/wake_tab/);
+  });
+
+  it('explainError — does not send a failed wake_tab back to wake_tab', async () => {
+    chrome.tabs.get.mockResolvedValue({ id: 4, discarded: true, url: 'https://a.com', status: 'complete' });
+    const msg = await api.explainError(new Error('An unexpected error occurred'), { tabId: 4 }, 'wake_tab');
+    expect(msg).toMatch(/open_tab with its URL \(https:\/\/a\.com\)/);
+    expect(msg).not.toMatch(/Call wake_tab/);
+  });
+
+  it('explainError — does not suggest reloading a page that refuses scripts', async () => {
+    chrome.tabs.get.mockResolvedValue({ id: 4, url: 'https://a.com/doc.pdf', status: 'complete' });
+    const msg = await api.explainError(new Error('Missing host permission for the tab'), { tabId: 4 });
+    expect(msg).toMatch(/does not let extensions read or drive this page/);
+    expect(msg).not.toMatch(/page_reload/);
+  });
+
+  it('getSessionId — is kept for the browser session and empty without session storage', async () => {
+    const saved = chrome.storage;
+    const store = {};
+    chrome.storage = { session: {
+      get: async () => ({ ...store }),
+      set: async (v) => { Object.assign(store, v); },
+    } };
+    const first = await api.getSessionId();
+    expect(first).toBeTruthy();
+    expect(await api.getSessionId()).toBe(first);
+    chrome.storage = {};
+    expect(await api.getSessionId()).toBe('');
+    chrome.storage = saved;
   });
 
   it('explainError — points a closed tab at list_tabs and open_tab', async () => {
