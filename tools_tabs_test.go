@@ -74,6 +74,8 @@ type tabBrowser struct {
 	mu   sync.Mutex
 	got  map[string]map[string]any
 	tabs []int
+	// approve answers approve_agent; nil means the user says yes.
+	approve func() map[string]any
 }
 
 func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocket.Conn {
@@ -99,6 +101,11 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 				"closed":  []map[string]any{{"id": 7}},
 				"skipped": []map[string]any{{"id": 8, "reason": "pinned"}},
 			}}
+		case "approve_agent":
+			if b.approve != nil {
+				return b.approve()
+			}
+			return map[string]any{"result": map[string]any{"approved": true}}
 		case "wake_tab":
 			return map[string]any{"result": map[string]any{"id": params["tabId"], "loaded": true, "interactive": true}}
 		case "move_tabs":

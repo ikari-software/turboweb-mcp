@@ -71,7 +71,9 @@ func registerSessionTools(s *server.MCPServer) {
 					"All other tools (except connection_status / check_for_updates / self_update) "+
 					"refuse to run until you call this once. The extension popup and on-page "+
 					"cursor then show who you are instead of a guessed editor name. Call again "+
-					"only if your task changes. Cheap: no browser round-trip."),
+					"only if your task changes. The first call opens a prompt in the browser where the human "+
+					"approves you (they see your name, your task and where you connect from) and waits up to "+
+					"two minutes for their answer, so give an honest, specific `task`."),
 			mcp.WithString("name", mcp.Required(), mcp.Description(
 				"Short name to show on the cursor and toasts, e.g. \"Claude\", \"Codex\", "+
 					"\"GPT-5\", or a persona name if you have one. Max 40 chars.")),
@@ -101,5 +103,11 @@ func handleIntroduce(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolR
 	})
 	logger.Printf("Agent introduced itself: %s", describeSession())
 	publishSession()
-	return mcp.NewToolResultText("Thanks! The browser now shows you as " + describeSession() + "."), nil
+	// The human decides whether this agent may use their browser. This
+	// blocks on a window in the browser, so it can take a while.
+	note, err := requestApproval()
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText("Thanks! The browser now shows you as " + describeSession() + ". " + note), nil
 }

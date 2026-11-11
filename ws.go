@@ -108,6 +108,14 @@ type relayClientInfo struct {
 	profile     map[string]string
 	pid         int
 	connectedAt time.Time
+	// id names this agent session to the browser, which asks its user to
+	// approve it. Derived from a key the client mints once per process, so
+	// an approval survives the client reconnecting.
+	id string
+	// remote and origin are where the connection came from, as seen by
+	// the daemon (not self-reported): the peer address and Origin header.
+	remote string
+	origin string
 	// hue is a 0–359 degree value assigned by computeClientHues based on
 	// the agent's position in the connectedAt-sorted list. First agent
 	// gets the brand orange hue (40°); each subsequent agent steps by
@@ -181,7 +189,10 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info := &relayClientInfo{conn: conn, connectedAt: time.Now()}
+	info := &relayClientInfo{
+		conn: conn, connectedAt: time.Now(),
+		id: randomHex(8), remote: r.RemoteAddr, origin: r.Header.Get("Origin"),
+	}
 	relayClientsMu.Lock()
 	relayClients[conn] = info
 	count := len(relayClients)
@@ -225,6 +236,9 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 			info.displayName = ctrl.DisplayName
 			info.profile = pickRelayProfile(raw)
 			info.pid = ctrl.PID
+			if key, _ := raw["key"].(string); key != "" {
+				info.id = clientIDFromKey(key)
+			}
 			// Compute hue inline so the very first command after
 			// register can be tagged correctly — the debounced
 			// broadcastClientsToBrowsers below would otherwise leave
@@ -264,6 +278,9 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		// activity-row per agent so a human watching can distinguish
 		// who's driving when multiple agents share a tab.
 		req.Params["_clientHue"] = info.hue
+		// Set unconditionally: the browser decides whether to obey a
+		// command by this, so a client must not be able to supply its own.
+		req.Params["_client"] = info.stamp()
 		relayClientsMu.Unlock()
 
 		go func(reqID, action string, params map[string]any, timeout int) {
@@ -346,6 +363,11 @@ func doBroadcastClientsToBrowsers() {
 			"sessionType": c.sessionType,
 			"connectedAt": c.connectedAt.UnixMilli(),
 			"hue":         c.hue,
+			"id":          c.id,
+			"remote":      c.remote,
+		}
+		if c.origin != "" {
+			entry["origin"] = c.origin
 		}
 		if c.displayName != "" {
 			entry["displayName"] = c.displayName
@@ -823,10 +845,14 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	if _, ok := params["_clientHue"]; !ok {
 		params["_clientHue"] = brandHue
 	}
+	// In-process mode: this process is the agent's own server.
+	if _, ok := params["_client"]; !ok {
+		params["_client"] = localClientStamp()
+	}
 	open := getOpenBrowsers()
 	if len(open) == 0 {
-		// Try auto-launching a browser
-		if browserConfig != nil && browserConfig.AutoLaunch {
+		// Try auto-launching a browser (never just to ask for approval).
+		if browserConfig != nil && browserConfig.AutoLaunch && action != "approve_agent" {
 			if _, err := launchBrowser(false); err != nil {
 				logger.Printf("Auto-launch failed: %v", err)
 			} else {
@@ -840,7 +866,10 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 
 	// list_tabs: query all browsers, merge results
 	if action == "list_tabs" {
-		return sendListTabs(open, timeout)
+		return sendListTabs(open, timeout, params)
+	}
+	if action == "approve_agent" {
+		return sendApproveAgent(open, params, timeout)
 	}
 
 	// Tab management addresses tabs through its own arguments, not tabId.
@@ -875,7 +904,10 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 }
 
 // sendListTabs fans out list_tabs to all browsers and merges results.
-func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, error) {
+//
+// params carries who is asking (the _client stamp). The daemon's own cache
+// refreshes pass internalParams instead.
+func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any) (json.RawMessage, error) {
 	type result struct {
 		tabs []json.RawMessage
 	}
@@ -886,7 +918,7 @@ func sendListTabs(open []*BrowserConnection, timeout int) (json.RawMessage, erro
 		wg.Add(1)
 		go func(i int, bc *BrowserConnection) {
 			defer wg.Done()
-			raw, err := sendTo(bc, "list_tabs", nil, timeout)
+			raw, err := sendTo(bc, "list_tabs", params, timeout)
 			if err != nil {
 				return
 			}
@@ -984,7 +1016,7 @@ func sendToTab(open []*BrowserConnection, tabID int, action string, params map[s
 	found := owners(open, tabID)
 	if len(found) == 0 && len(open) > 1 {
 		// Stale or empty cache: refresh it rather than guess.
-		if _, err := sendListTabs(open, timeout); err == nil {
+		if _, err := sendListTabs(open, timeout, internalParams()); err == nil {
 			found = owners(open, tabID)
 		}
 	}

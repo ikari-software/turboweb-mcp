@@ -483,3 +483,11 @@ const statsTimer = setInterval(() => {
   catch { clearInterval(statsTimer); }
 }, 1000);
 port.onDisconnect.addListener(() => clearInterval(statsTimer));
+
+// "Ask before an agent connects": on unless the user turned it off.
+(() => {
+  const box = document.getElementById('ask-before-connect');
+  if (!box || !chrome.storage?.local) return;
+  chrome.storage.local.get('askBeforeConnect').then((got) => { box.checked = got.askBeforeConnect !== false; }).catch(() => {});
+  box.addEventListener('change', () => { chrome.storage.local.set({ askBeforeConnect: box.checked }); });
+})();

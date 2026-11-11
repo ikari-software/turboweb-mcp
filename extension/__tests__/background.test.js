@@ -53,6 +53,7 @@ beforeAll(() => {
     'setInputFiles', 'interceptFileChooser',
     'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
     'executeJsMain', 'adaptScript', 'dispatch', 'explainError', 'getSessionId',
+    'ensureApproved', 'takeClient', 'settleApproval', 'handleApprovalMessage', 'approvals',
     'PAGE_ACTIONS_THAT_GATE_ON_CURSOR',
   ].join(', ');
 
@@ -1278,6 +1279,165 @@ describe('connect', () => {
     ws.close();
     expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '' });
     expect(chrome.alarms.create).toHaveBeenCalledWith('turbo-reconnect', expect.any(Object));
+  });
+});
+
+// ============================================================
+// Agent approval
+// ============================================================
+describe('agent approval', () => {
+  const agent = (over = {}) => ({ id: 'a1', name: 'Claude', task: 'Sorting tabs', remote: '127.0.0.1:5000', ...over });
+  const approvePage = { id: 'test-id', url: 'chrome-extension://test-id/approve.html?id=a1' };
+  const answer = (allow, id = 'a1', sender = approvePage) => {
+    const reply = vi.fn();
+    api.handleApprovalMessage({ type: 'approval_decide', id, allow }, sender, reply);
+    return reply;
+  };
+  const prompted = () => vi.waitFor(() => expect(api.approvals.pending.size).toBe(1));
+
+  beforeEach(() => {
+    chrome.storage.local._data.askBeforeConnect = true;
+    chrome.storage.session._data = {};
+    api.approvals.approved.clear();
+    api.approvals.denied.clear();
+    api.approvals.pending.clear();
+    chrome.windows.create.mockReset().mockResolvedValue({ id: 900 });
+    chrome.tabs.create.mockReset().mockResolvedValue({ id: 55 });
+  });
+  afterEach(() => {
+    chrome.storage.local._data.askBeforeConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('opens an extension window and lets the agent in once the user allows it', async () => {
+    const pending = api.ensureApproved(agent(), { explicit: true });
+    await prompted();
+    expect(chrome.windows.create).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'chrome-extension://test-id/approve.html?id=a1', type: 'popup', focused: true,
+    }));
+    // The page reads what to show from the background, not from its URL.
+    const shown = vi.fn();
+    api.handleApprovalMessage({ type: 'approval_get', id: 'a1' }, approvePage, shown);
+    expect(shown).toHaveBeenCalledWith({ client: expect.objectContaining({ name: 'Claude', task: 'Sorting tabs' }) });
+
+    expect(answer(true)).toHaveBeenCalledWith({ ok: true });
+    await expect(pending).resolves.toBeUndefined();
+    expect(chrome.storage.session._data.approvedAgents).toHaveProperty('a1');
+
+    // Approved for the session: no second prompt.
+    await api.ensureApproved(agent());
+    expect(chrome.windows.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('turns a declined agent away and does not ask again for its next commands', async () => {
+    const pending = api.ensureApproved(agent(), { explicit: true });
+    await prompted();
+    answer(false);
+    await expect(pending).rejects.toThrow(/The user declined to let "Claude" use this browser\. What to do: stop/);
+    await expect(api.ensureApproved(agent())).rejects.toThrow(/declined/);
+    // Not even by introducing itself again straight away.
+    await expect(api.ensureApproved(agent(), { explicit: true })).rejects.toThrow(/declined/);
+    expect(chrome.windows.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a declined agent ask again only after a pause, and only by introducing itself', async () => {
+    api.approvals.denied.set('a1', Date.now() - 31000);
+    await expect(api.ensureApproved(agent())).rejects.toThrow(/declined/);
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+    const pending = api.ensureApproved(agent(), { explicit: true });
+    await prompted();
+    answer(true);
+    await pending;
+  });
+
+  it('only takes an answer from the approval page', async () => {
+    const pending = api.ensureApproved(agent(), { explicit: true });
+    await prompted();
+    // A content script on some web page, and another extension.
+    expect(answer(true, 'a1', { id: 'test-id', url: 'https://evil.example/', tab: { id: 3 } })).not.toHaveBeenCalled();
+    expect(answer(true, 'a1', { id: 'other-ext', url: 'chrome-extension://test-id/approve.html' })).not.toHaveBeenCalled();
+    expect(api.approvals.pending.size).toBe(1);
+    answer(false);
+    await expect(pending).rejects.toThrow(/declined/);
+  });
+
+  it('shares one prompt between commands and treats a closed window as no answer', async () => {
+    const one = api.ensureApproved(agent(), { explicit: true });
+    const two = api.ensureApproved(agent({ task: 'Now closing duplicates' }), { explicit: true });
+    await prompted();
+    expect(chrome.windows.create).toHaveBeenCalledTimes(1);
+    chrome.windows.onRemoved._fire(900);
+    await expect(one).rejects.toThrow(/closed without an answer/);
+    await expect(two).rejects.toThrow(/closed without an answer/);
+    // Not a "no": the agent may ask again.
+    expect(api.approvals.denied.size).toBe(0);
+  });
+
+  it('does not hold an ordinary command for long, and leaves the prompt open', async () => {
+    vi.useFakeTimers();
+    const pending = api.ensureApproved(agent());
+    const failed = expect(pending).rejects.toThrow(/has not yet approved "Claude".*call introduce again/);
+    await vi.advanceTimersByTimeAsync(15000);
+    await failed;
+    expect(api.approvals.pending.size).toBe(1);
+  });
+
+  it('falls back to a tab when no window can be opened', async () => {
+    chrome.windows.create.mockRejectedValue(new Error('no windows here'));
+    const pending = api.ensureApproved(agent(), { explicit: true });
+    await vi.waitFor(() => expect(chrome.tabs.create).toHaveBeenCalled());
+    chrome.tabs.onRemoved._fire(55);
+    await expect(pending).rejects.toThrow(/closed without an answer/);
+  });
+
+  it('asks nothing when the user switched approval off', async () => {
+    chrome.storage.local._data.askBeforeConnect = false;
+    await api.ensureApproved(agent());
+    expect(chrome.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('takeClient — strips the stamp and treats a command without one as an unnamed agent', () => {
+    const params = { tabId: 4, _client: { id: 'a1', name: 'Claude', task: 'x'.repeat(500), pid: 7, extra: '<b>' } };
+    const client = api.takeClient(params, 'fallback');
+    expect(params).toEqual({ tabId: 4 });
+    expect(client).toMatchObject({ id: 'a1', name: 'Claude', pid: 7 });
+    expect(client.task).toHaveLength(200);
+    expect(client).not.toHaveProperty('extra');
+    expect(api.takeClient({}, 'Cursor')).toEqual({ id: 'legacy', name: 'Cursor', legacy: true });
+    expect(api.takeClient({ _client: { id: 5 } }, '')).toMatchObject({ id: 'legacy', name: 'Unknown agent' });
+  });
+
+  it('holds a command at the socket until the agent is approved', async () => {
+    const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }
+    api.connect();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    ws._open();
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled()); // hello
+    ws.send.mockClear();
+    chrome.tabs.query.mockResolvedValue([{ id: 1, title: 'Bank', url: 'https://bank.example/' }]);
+
+    ws._receive({ id: '7', action: 'list_tabs', params: { _client: agent() } });
+    await prompted();
+    expect(chrome.tabs.query).not.toHaveBeenCalled();
+    answer(false);
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toMatchObject({ id: '7', error: expect.stringMatching(/declined/) });
+    expect(chrome.tabs.query).not.toHaveBeenCalled();
+
+    // The daemon's own bookkeeping is not an agent and is not asked about.
+    ws.send.mockClear();
+    ws._receive({ id: '8', action: 'list_tabs', params: { _internal: true } });
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toMatchObject({ id: '8', result: [expect.objectContaining({ id: 1 })] });
+
+    // approve_agent answers with the decision and runs nothing.
+    ws.send.mockClear();
+    ws._receive({ id: '9', action: 'approve_agent', params: { _client: agent({ id: 'b2' }), timeoutMs: 120000 } });
+    await prompted();
+    answer(true, 'b2', { id: 'test-id', url: 'chrome-extension://test-id/approve.html?id=b2' });
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({ id: '9', result: { approved: true } });
   });
 });
 

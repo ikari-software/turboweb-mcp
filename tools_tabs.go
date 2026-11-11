@@ -172,7 +172,7 @@ func browserForRef(open []*BrowserConnection, v any, timeout int) (*BrowserConne
 	}
 	found := owners(open, id)
 	if len(found) == 0 {
-		if _, err := sendListTabs(open, timeout); err == nil {
+		if _, err := sendListTabs(open, timeout, internalParams()); err == nil {
 			found = owners(open, id)
 		}
 	}

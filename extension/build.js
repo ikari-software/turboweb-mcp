@@ -14,7 +14,7 @@ const DIST = path.join(SRC, 'dist');
 // version in manifest.json is a placeholder — it is overwritten here so the
 // extension version never has to be bumped separately from the binary.
 const VERSION = fs.readFileSync(path.join(SRC, '..', 'VERSION'), 'utf8').trim();
-const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js'];
+const SHARED = ['background.js', 'content.js', 'popup.html', 'popup.js', 'approve.html', 'approve.js'];
 // Directory trees copied verbatim into each dist target. The browser
 // consumes `icons/` via manifest.icons + manifest.action.default_icon.
 const SHARED_DIRS = ['icons'];

@@ -30,6 +30,7 @@ globalThis.chrome = {
     sendMessage: vi.fn(),
     getManifest: vi.fn(() => ({ version: '0.0.0-test' })),
     getURL: vi.fn((path) => `chrome-extension://test-id/${path}`),
+    id: 'test-id',
     onMessage: makeEvent(),
     onConnect: makeEvent(),
     get lastError() { return chrome.runtime._lastError; },
@@ -55,6 +56,22 @@ globalThis.chrome = {
   },
   windows: {
     update: vi.fn().mockResolvedValue({}),
+    create: vi.fn().mockResolvedValue({ id: 900 }),
+    onRemoved: makeEvent(),
+  },
+  // Agent approval is off by default here so tests of everything else do
+  // not have to answer a prompt; the approval tests turn it on.
+  storage: {
+    local: {
+      _data: { askBeforeConnect: false },
+      get: vi.fn(async () => ({ ...chrome.storage.local._data })),
+      set: vi.fn(async (v) => { Object.assign(chrome.storage.local._data, v); }),
+    },
+    session: {
+      _data: {},
+      get: vi.fn(async () => ({ ...chrome.storage.session._data })),
+      set: vi.fn(async (v) => { Object.assign(chrome.storage.session._data, v); }),
+    },
   },
   debugger: {
     attach: vi.fn().mockResolvedValue(undefined),
