@@ -85,6 +85,9 @@ bypasses the overlay entirely. For reads, prefer `+"`extract_text` / `find_text`
 host / task if known). Every other tool refuses to run until you do, so the
 human sees who is driving instead of a guessed editor name.
 
+⚠️ Every tab-scoped tool needs a `+"`tabId`"+`: take one from `+"`list_tabs`"+`, or call
+`+"`open_tab`"+` for a tab of your own. There is no implicit "active tab".
+
 For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 `)),
 	)
@@ -102,6 +105,7 @@ For deeper guidance, invoke the `+"`agent-rules`"+` prompt.
 func registerAllTools(s *server.MCPServer) {
 	registerSessionTools(s)
 	registerBrowserTools(s)
+	registerTabTools(s)
 	registerDomTools(s)
 	registerFrameTools(s)
 	registerFormTools(s)
@@ -155,6 +159,15 @@ func addTool(s *server.MCPServer, tool mcp.Tool, handler server.ToolHandlerFunc)
 	if _, hasFrame := tool.InputSchema.Properties["frame"]; hasFrame && tool.Name != "navigate" {
 		handler = injectStickyFrame(handler)
 	}
+	// Tools that declare a `tabId` must be given one: with several agents and
+	// a human sharing the browser, "whichever tab is focused" is not a target.
+	if _, hasTab := tool.InputSchema.Properties["tabId"]; hasTab {
+		if !slices.Contains(tool.InputSchema.Required, "tabId") {
+			tool.InputSchema.Required = append(tool.InputSchema.Required, "tabId")
+		}
+		handler = requireTabID(tool.Name, handler)
+	}
+	handler = withErrorHints(handler)
 	handler = requireIntroduction(tool.Name, handler)
 	s.AddTool(tool, handler)
 }

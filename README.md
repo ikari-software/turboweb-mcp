@@ -186,7 +186,7 @@ Nothing breaks either way.
 Every tool also accepts a required **`intent`** argument — one short
 sentence describing what the agent is about to do.
 
-Browser & page: `connection_status`, `list_tabs`, `navigate`,
+Browser & page: `connection_status`, `list_tabs`, `open_tab`, `close_tabs`, `move_tabs`, `wake_tab`, `navigate`,
 `launch_browser`, `screenshot`, `turbo_snapshot`, `page_yaml`,
 `page_reload`, `print_to_pdf`.
 

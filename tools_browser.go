@@ -54,7 +54,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- list_tabs ---
 	addTool(s,
 		mcp.NewTool("list_tabs",
-			mcp.WithDescription("List open tabs in every connected browser with their IDs, titles, URLs and browser. IDs look like \"zen-3f9a1c2b:42\": browsers number tabs independently, so pass the ID as given to other tools' tabId."),
+			mcp.WithDescription("List open tabs in every connected browser with their IDs, titles, URLs, browser, window, position in the tab strip (index) and pinned state. IDs look like \"zen-3f9a1c2b:42\": browsers number tabs independently, so pass the ID as given to other tools' tabId."),
 		),
 		handleListTabs,
 	)
@@ -62,7 +62,7 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- navigate ---
 	addTool(s,
 		mcp.NewTool("navigate",
-			mcp.WithDescription("Navigate a tab to a URL. Omit tabId to use the active tab. "+
+			mcp.WithDescription("Navigate a tab to a URL. "+
 				"Pass `frame` to navigate ONLY that frame instead of the whole tab — this "+
 				"preserves the parent frameset, so frameset-dependent JS (geocoders, save "+
 				"handlers) keeps working. Navigating to a frame's content URL at the top level "+

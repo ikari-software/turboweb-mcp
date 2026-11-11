@@ -122,10 +122,14 @@ toast. Bypassing them with execute_js leaves the user blind.
 
 # Multi-tab orchestration
 
-- Every tool accepts an optional tabId. list_tabs to discover targets;
-  pass tabId to drive a specific window. Pass IDs exactly as list_tabs
-  gives them ("zen-3f9a1c2b:42"): each browser numbers its own tabs, so a
-  bare 42 may exist in Zen and Firefox at once.
+- Every tab-scoped tool requires a tabId; there is no implicit "active
+  tab". list_tabs to discover targets, or open_tab to get a tab of your
+  own (it returns the new id). Pass IDs exactly as given
+  ("zen-3f9a1c2b:42"): each browser numbers its own tabs, so a bare 42
+  may exist in Zen and Firefox at once.
+- move_tabs reorders the tab strip (tabs land side by side in the order
+  you list them, after/before an anchor tab or at an index) and
+  close_tabs closes tabs. Both take tabs of one browser per call.
 - The daemon supports multiple agents driving the same browser, and a
   single agent driving multiple browsers. When you take a tabId-aware
   action, the on-page overlay tints with this agent's hue so the user can
