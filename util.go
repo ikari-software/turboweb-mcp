@@ -96,28 +96,51 @@ func getBool(args map[string]any, key string, defaultVal bool) bool {
 // drowning the popup/toast in a 5KB intent.
 const maxIntentLen = 200
 
+// reservedParam reports whether an argument key belongs to the server, not to
+// the agent. The daemon and extension exchange a handful of underscore-prefixed
+// fields that steer behaviour rather than describe a command:
+//
+//	_internal  skip the browser's agent-approval gate (daemon bookkeeping only)
+//	_client*   the identity stamp the browser shows in the approval prompt
+//	_intent    the agent's narration, rewritten by rawArgs below
+//
+// An agent that can set any of these can either bypass the approval gate
+// entirely (_internal) or write its own consent prompt (_client). mcp-go does
+// not validate arguments against the tool schema, so every key the caller
+// sends arrives here verbatim; this predicate is the single chokepoint that
+// keeps them out. No tool takes an underscore-prefixed argument.
+func reservedParam(k string) bool {
+	return strings.HasPrefix(k, "_")
+}
+
 // rawArgs returns the arguments map suitable for forwarding to the extension
-// via the WS bridge. As a side-effect it pulls out the agent-supplied `intent`
-// field, clamps it to maxIntentLen, and rewrites it as `_intent` so the
-// extension popup and on-page overlay can surface it to the human user.
-// The original `intent` key is removed so handlers never see it.
+// via the WS bridge. It drops every server-owned key (see reservedParam), so
+// an agent cannot smuggle in a `_internal` bypass or a forged `_client` stamp.
+// As a side-effect it pulls out the agent-supplied `intent` field, clamps it to
+// maxIntentLen, and rewrites it as `_intent` so the extension popup and on-page
+// overlay can surface it to the human user. The original `intent` key is
+// removed so handlers never see it.
+//
+// The result is always a fresh map: callers must not hand back the caller's
+// own arguments, because sendDirect mutates what it is given when it stamps
+// identity onto it.
 func rawArgs(args map[string]any) map[string]any {
-	if args == nil {
-		return map[string]any{}
-	}
-	intent, hasIntent := args["intent"].(string)
-	if !hasIntent || intent == "" {
-		return args
-	}
-	if len(intent) > maxIntentLen {
-		intent = intent[:maxIntentLen] + "…"
-	}
 	out := make(map[string]any, len(args))
 	for k, v := range args {
-		if k == "intent" {
+		if k == "intent" || reservedParam(k) {
 			continue
 		}
 		out[k] = v
+	}
+	if args == nil {
+		return out
+	}
+	intent, ok := args["intent"].(string)
+	if !ok || intent == "" {
+		return out
+	}
+	if len(intent) > maxIntentLen {
+		intent = intent[:maxIntentLen] + "…"
 	}
 	out["_intent"] = intent
 	return out

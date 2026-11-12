@@ -336,6 +336,9 @@ function connect() {
     delete params._clientType;
     delete params._clientName;
     delete params._clientHue;
+    const client = takeClient(params, clientName || clientLabel);
+    const internal = params._internal === true;
+    delete params._internal;
 
     const start = performance.now();
     stats.commands++;
@@ -350,6 +353,26 @@ function connect() {
       params: summariseParams(msg.action, params),
     };
     logActivity({ ...baseEntry, status: 'start', timestamp: Date.now() });
+
+    // Nothing an agent sends is acted on until the person at this browser
+    // has let that agent in.
+    if (!internal) {
+      const asking = msg.action === 'approve_agent';
+      try {
+        await ensureApproved(client, { explicit: asking, timeoutMs: params.timeoutMs });
+      } catch (e) {
+        stats.errors++;
+        logActivity({ ...baseEntry, status: 'error', duration: Math.round(performance.now() - start), error: e.message, timestamp: Date.now() });
+        broadcast({ type: 'stats', ...getStats() });
+        ws?.send(JSON.stringify({ id: msg.id, error: e.message }));
+        return;
+      }
+      if (asking) {
+        logActivity({ ...baseEntry, status: 'done', duration: Math.round(performance.now() - start), timestamp: Date.now() });
+        ws?.send(JSON.stringify({ id: msg.id, result: { approved: true } }));
+        return;
+      }
+    }
 
     const overlayPromise = notifyOverlay(params.tabId, {
       kind: 'start',
@@ -446,6 +469,211 @@ chrome.tabs.onActivated.addListener(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) connect();
 });
 
+
+// --- Agent approval ---
+// An agent may drive this browser only after the person using it said yes in
+// a window this extension opens. The prompt cannot live in a web page: a page
+// could click it. Approvals are per agent session (the id the daemon stamps
+// on each command) and are forgotten when the browser restarts.
+const APPROVAL_WAIT_MS = 120000;      // `introduce` waits this long for an answer
+const APPROVAL_LAZY_WAIT_MS = 15000;  // any other command waits this long, then reports
+const APPROVAL_REASK_MS = 30000;      // a declined agent cannot ask again sooner
+const approvals = {
+  approved: new Map(),
+  denied: new Map(),
+  pending: new Map(),
+  loaded: false,
+  loading: null, // in-flight loadApprovals promise, shared by concurrent callers
+};
+
+// takeClient removes the daemon's identity stamp from a command's params and
+// returns it. A daemon from before the stamp existed sends none: everything
+// it relays is treated as one unnamed agent, which still has to be approved.
+function takeClient(params, fallbackName) {
+  const c = params._client;
+  delete params._client;
+  const text = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  if (!c || typeof c !== 'object' || !text(c.id, 64)) {
+    return { id: 'legacy', name: fallbackName || 'Unknown agent', legacy: true };
+  }
+  return {
+    id: text(c.id, 64),
+    name: text(c.name, 80) || 'Unnamed agent',
+    agentName: text(c.agentName, 80),
+    model: text(c.model, 80),
+    task: text(c.task, 200),
+    hostName: text(c.hostName, 80),
+    project: text(c.project, 120),
+    remote: text(c.remote, 80),
+    origin: text(c.origin, 200),
+    pid: Number.isInteger(c.pid) ? c.pid : 0,
+  };
+}
+
+async function approvalRequired() {
+  try {
+    const got = await chrome.storage.local.get('askBeforeConnect');
+    return got.askBeforeConnect !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function loadApprovals() {
+  // Latch only after the read finishes. Setting it first means a command that
+  // arrives while the storage read is in flight sees loaded:true, skips the
+  // hydration and its approved entry, and re-prompts a user who already said
+  // yes. Concurrent callers share the in-flight promise instead.
+  if (approvals.loaded) return;
+  if (approvals.loading) return approvals.loading;
+  approvals.loading = (async () => {
+    try {
+      const got = await chrome.storage.session.get(['approvedAgents', 'deniedAgents']);
+      for (const [id, v] of Object.entries(got.approvedAgents || {})) approvals.approved.set(id, v);
+      for (const [id, v] of Object.entries(got.deniedAgents || {})) approvals.denied.set(id, v);
+      approvals.loaded = true;
+    } catch {
+      // No session storage: approvals last as long as this script does.
+      approvals.loaded = true;
+    } finally {
+      approvals.loading = null;
+    }
+  })();
+  return approvals.loading;
+}
+
+function saveApprovals() {
+  try {
+    chrome.storage.session
+      .set({ approvedAgents: Object.fromEntries(approvals.approved), deniedAgents: Object.fromEntries(approvals.denied) })
+      .catch(() => {});
+  } catch {}
+}
+
+// ensureApproved resolves once the person has allowed this agent, and throws
+// with what the agent should do next otherwise. `explicit` is the agent
+// asking to be let in (introduce); any other command opens the same prompt
+// but does not wait as long, and never re-opens one after a "no".
+async function ensureApproved(client, { explicit = false, timeoutMs } = {}) {
+  if (!(await approvalRequired())) return;
+  await loadApprovals();
+  if (approvals.approved.has(client.id)) return;
+
+  const who = JSON.stringify(client.name);
+  const declined = () => new Error(`The user declined to let ${who} use this browser. ` +
+    'What to do: stop calling browser tools and tell the user they declined. Do not retry, ' +
+    'and do not switch to another browser or automation tool.');
+  const deniedAt = approvals.denied.get(client.id);
+  if (deniedAt && (!explicit || Date.now() - deniedAt < APPROVAL_REASK_MS)) throw declined();
+
+  let entry = approvals.pending.get(client.id);
+  if (!entry) {
+    entry = { client };
+    entry.promise = new Promise((resolve) => { entry.resolve = resolve; });
+    approvals.pending.set(client.id, entry);
+    openApprovalWindow(entry);
+  } else {
+    entry.client = client; // show the latest name and task
+  }
+
+  const wait = explicit ? Math.min(timeoutMs > 0 ? timeoutMs : APPROVAL_WAIT_MS, APPROVAL_WAIT_MS) : APPROVAL_LAZY_WAIT_MS;
+  let timer;
+  const decision = await Promise.race([
+    entry.promise,
+    new Promise((resolve) => { timer = setTimeout(() => resolve('waiting'), wait); }),
+  ]);
+  clearTimeout(timer);
+  switch (decision) {
+    case 'allow':
+      return;
+    case 'deny':
+      throw declined();
+    case 'dismissed':
+      throw new Error(`The approval window for ${who} was closed without an answer. ` +
+        'What to do: ask the user whether they want you to use their browser. If they do, call introduce again.');
+    case 'unavailable':
+      throw new Error(`This browser could not open the approval window for ${who}. ` +
+        'What to do: tell the user; they can turn off "Ask before an agent connects" in the TurboWeb popup if they trust this setup.');
+    default:
+      throw new Error(`The user has not yet approved ${who}: an approval window is open in their browser. ` +
+        'What to do: tell the user to answer it, then call introduce again, which waits for their decision.');
+  }
+}
+
+async function openApprovalWindow(entry) {
+  const url = chrome.runtime.getURL('approve.html') + '?id=' + encodeURIComponent(entry.client.id);
+  try {
+    const win = await chrome.windows.create({ url, type: 'popup', width: 480, height: 520, focused: true });
+    entry.windowId = win?.id;
+  } catch {
+    try {
+      const tab = await chrome.tabs.create({ url, active: true });
+      entry.tabId = tab?.id;
+    } catch {
+      settleApproval(entry.client.id, 'unavailable');
+    }
+  }
+  updateApprovalBadge();
+}
+
+function settleApproval(id, decision) {
+  const entry = approvals.pending.get(id);
+  if (!entry) return false;
+  approvals.pending.delete(id);
+  if (decision === 'allow') {
+    approvals.denied.delete(id);
+    approvals.approved.set(id, { name: entry.client.name, at: Date.now() });
+    saveApprovals();
+  } else if (decision === 'deny') {
+    approvals.denied.set(id, Date.now());
+    // Persist the refusal too: it is the brake that stops a declined agent
+    // re-prompting, and an unpersisted one dies with the service worker.
+    saveApprovals();
+  }
+  entry.resolve(decision);
+  updateApprovalBadge();
+  return true;
+}
+
+function updateApprovalBadge() {
+  if (approvals.pending.size > 0) {
+    chrome.action.setBadgeText({ text: '?' });
+    chrome.action.setBadgeBackgroundColor({ color: '#d29922' });
+  } else {
+    updateBadge(ws?.readyState === WebSocket.OPEN);
+  }
+}
+
+// Only the approval page may answer. Content scripts can send runtime
+// messages too, and they run next to pages we do not trust.
+function isApprovalPage(sender) {
+  return sender?.id === chrome.runtime.id &&
+    String(sender.url || '').startsWith(chrome.runtime.getURL('approve.html'));
+}
+
+function handleApprovalMessage(msg, sender, sendResponse) {
+  if (!msg || (msg.type !== 'approval_get' && msg.type !== 'approval_decide')) return;
+  if (!isApprovalPage(sender)) return;
+  const entry = approvals.pending.get(msg.id);
+  if (msg.type === 'approval_get') {
+    sendResponse(entry ? { client: entry.client } : { gone: true });
+  } else {
+    sendResponse({ ok: settleApproval(msg.id, msg.allow === true ? 'allow' : 'deny') });
+  }
+}
+chrome.runtime.onMessage.addListener(handleApprovalMessage);
+
+// Closing the window is not an answer either way.
+chrome.windows?.onRemoved?.addListener((windowId) => {
+  for (const [id, entry] of approvals.pending) {
+    if (entry.windowId === windowId) settleApproval(id, 'dismissed');
+  }
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [id, entry] of approvals.pending) {
+    if (entry.tabId === tabId) settleApproval(id, 'dismissed');
+  }
+});
 
 // --- Resolve tab ID (use active tab if not specified) ---
 async function resolveTab(tabId) {

@@ -32,7 +32,7 @@ func pickRelayProfile(raw map[string]any) map[string]string {
 // current session snapshot.
 func registerMessage() []byte {
 	s := snapshotSession()
-	msg := map[string]any{"type": "register"}
+	msg := map[string]any{"type": "register", "key": sessionKey}
 	keys := append([]string{"label", "displayName", "sessionType", "pid"}, relayProfileFields...)
 	for _, k := range keys {
 		if v, ok := s[k]; ok {
