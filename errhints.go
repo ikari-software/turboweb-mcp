@@ -43,6 +43,10 @@ var errorHints = []struct {
 		"nobody answered the approval prompt in time. Tell the user a window is waiting for their decision and ask " +
 			"them to answer it, then call introduce again, which waits for their answer. Do not retry other browser " +
 			"tools meanwhile: without approval they are refused."},
+	{regexp.MustCompile(`(?i)declined to let|has not yet approved|approval window`),
+		"the browser's user is the one deciding, so do not retry or switch browsers. connection_status reports " +
+			"`approval` per browser: denied means stop, pending means ask the user to answer the window, " +
+			"needed means call introduce."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
 		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
 			"page_reload the tab, or open_tab with its URL and work in the new tab."},

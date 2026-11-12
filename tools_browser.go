@@ -46,7 +46,11 @@ func registerBrowserTools(s *server.MCPServer) {
 	// --- connection_status ---
 	addTool(s,
 		mcp.NewTool("connection_status",
-			mcp.WithDescription("Check if the browser extension and/or BiDi are connected to the MCP server"),
+			mcp.WithDescription("Check if the browser extension and/or BiDi are connected to the MCP server. "+
+				"The `approval` field says where this agent stands in each browser: approved, pending (a "+
+				"window is open awaiting the user), denied, needed (nobody asked yet) or off (the user "+
+				"turned the prompt off). Check it before concluding that a refused command means the "+
+				"browser is broken."),
 		),
 		handleConnectionStatus,
 	)
@@ -448,9 +452,27 @@ func round3(f float64) float64 {
 	return float64(int(f*1000+0.5)) / 1000
 }
 
+// headlessApprovalRefusal is the reason a headless launch is turned away. The
+// approval prompt is an extension window: in headless Chrome nobody can see it,
+// and openApprovalWindow neither succeeds visibly nor fails, so the agent would
+// block for two minutes and retry forever. Say so up front rather than letting
+// it discover a dead end. Empty means the launch may proceed.
+func headlessApprovalRefusal(headless bool) string {
+	if !headless || approvalSkipped() {
+		return ""
+	}
+	return "headless cannot answer the approval prompt: the browser asks its user before an " +
+		"agent may drive it, and a headless window has nobody to answer. " +
+		"What to do: either set TURBOWEB_SKIP_APPROVAL=1 in the MCP server's environment and " +
+		"restart it, or call launch_browser with headless:false so a human can approve you."
+}
+
 func handleLaunchBrowser(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	headless := getBool(args, "headless", false)
+	if reason := headlessApprovalRefusal(headless); reason != "" {
+		return mcp.NewToolResultError(reason), nil
+	}
 	pid, err := launchBrowser(headless)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
