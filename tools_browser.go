@@ -35,7 +35,8 @@ func registerBrowserTools(s *server.MCPServer) {
 					"The browser must already be running with the debug port. Start it like:\n"+
 					"  Zen/Firefox:  zen --remote-debugging-port=9222 --remote-allow-origins=*\n"+
 					"  Chrome:       chrome --remote-debugging-port=9222\n"+
-					"then call connect_bidi with that port. Check the result with connection_status (bidi:true).",
+					"then call connect_bidi with that port. Check the result with connection_status (bidi:true).\n\n"+
+					firefoxDebugPortWarning,
 			),
 			mcp.WithNumber("port", mcp.Required(), mcp.Description(
 				"The --remote-debugging-port the browser was started with (e.g. 9222).")),
@@ -464,6 +465,17 @@ func handleLaunchBrowser(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	})
 }
 
+// firefoxDebugPortWarning goes wherever we tell someone to start Firefox or
+// Zen with a debug port. Started that way, Firefox applies its "recommended
+// preferences" for automated testing to the profile in use and they stay
+// there afterwards: add-on and browser updates off, update and blocklist
+// servers pointed at placeholders. On an everyday profile that silently
+// stops updates for good.
+const firefoxDebugPortWarning = "Before doing this on Firefox/Zen with the user's everyday profile, have them set " +
+	"`remote.prefs.recommended` to false in about:config. Otherwise the browser applies its test-automation " +
+	"preferences to that profile and keeps them: add-on and browser updates stop, and the update and " +
+	"blocklist servers are replaced with placeholders. Tell the user this; do not ask them to run the command without it."
+
 func handleConnectBiDi(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	port := int(toFloat(args["port"]))
@@ -494,8 +506,8 @@ func handleConnectBiDi(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 			"connect_bidi: no WebDriver BiDi endpoint answered on port %d (%v). Start the browser "+
 				"WITH the debug port first, then retry — e.g. `zen --remote-debugging-port=%d "+
 				"--remote-allow-origins=*` (Firefox/Zen) or `chrome --remote-debugging-port=%d` "+
-				"(Chrome). The browser must already be running.",
-			port, lastErr, port, port)), nil
+				"(Chrome). The browser must already be running. %s",
+			port, lastErr, port, port, firefoxDebugPortWarning)), nil
 	}
 	return textResult(map[string]any{"connected": true, "bidi": true, "wsURL": wsURL, "port": port})
 }
