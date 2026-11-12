@@ -76,6 +76,9 @@ type tabBrowser struct {
 	tabs []int
 	// approve answers approve_agent; nil means the user says yes.
 	approve func() map[string]any
+	// listErr answers list_tabs with an error instead of a tab list (e.g. the
+	// refusal the extension sends when the agent was denied).
+	listErr string
 }
 
 func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocket.Conn {
@@ -89,6 +92,9 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 		b.mu.Unlock()
 		switch action {
 		case "list_tabs":
+			if b.listErr != "" {
+				return map[string]any{"error": b.listErr}
+			}
 			list := make([]map[string]any, len(b.tabs))
 			for i, id := range b.tabs {
 				list[i] = map[string]any{"id": id, "title": instance}

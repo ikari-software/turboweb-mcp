@@ -264,6 +264,17 @@ func handleRelayConnection(w http.ResponseWriter, r *http.Request) {
 		if req.Params == nil {
 			req.Params = map[string]any{}
 		}
+		// Drop anything the client tried to reserve for the server before
+		// stamping our own. An agent reaches this with a `_internal: true`
+		// that would skip the browser's approval gate, or a `_client` that
+		// would write its own consent prompt. rawArgs already strips these
+		// from tool arguments; this covers a relay client that speaks the
+		// protocol directly and never goes through the tool layer.
+		for k := range req.Params {
+			if reservedParam(k) {
+				delete(req.Params, k)
+			}
+		}
 		relayClientsMu.Lock()
 		if info.label != "" {
 			req.Params["_clientLabel"] = info.label
@@ -907,11 +918,18 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 //
 // params carries who is asking (the _client stamp). The daemon's own cache
 // refreshes pass internalParams instead.
+//
+// When the caller is an agent and every browser failed, the failures are
+// returned rather than swallowed: a denial comes back as an error from the
+// extension, and reporting it as an empty tab list would tell the agent the
+// browser is merely empty — leaving it no reason to stop. Internal refreshes
+// stay non-fatal, because nobody is waiting on their result.
 func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any) (json.RawMessage, error) {
 	type result struct {
 		tabs []json.RawMessage
 	}
 	results := make([]result, len(open))
+	errs := make([]string, len(open))
 	var wg sync.WaitGroup
 
 	for i, bc := range open {
@@ -920,6 +938,7 @@ func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any)
 			defer wg.Done()
 			raw, err := sendTo(bc, "list_tabs", params, timeout)
 			if err != nil {
+				errs[i] = bc.tabPrefix() + ": " + err.Error()
 				return
 			}
 			var tabs []map[string]any
@@ -957,7 +976,7 @@ func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any)
 			alreadyNamed := bc.name != "" && bc.name != "Chrome" // "Chrome" is the default fallback
 			_ = alreadyNamed
 			bc.mu.Unlock()
-			raw, err := sendTo(bc, "execute_js", map[string]any{"code": jsBrowserFingerprint}, 3000)
+			raw, err := sendTo(bc, "execute_js", internalParams("code", jsBrowserFingerprint), 3000)
 			if err != nil {
 				return
 			}
@@ -990,6 +1009,17 @@ func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any)
 	var all []json.RawMessage
 	for _, r := range results {
 		all = append(all, r.tabs...)
+	}
+	if len(all) == 0 && params["_internal"] != true {
+		var failed []string
+		for _, e := range errs {
+			if e != "" {
+				failed = append(failed, e)
+			}
+		}
+		if len(failed) > 0 {
+			return nil, fmt.Errorf("%s", strings.Join(failed, "; "))
+		}
 	}
 	merged, _ := json.Marshal(all)
 	return merged, nil

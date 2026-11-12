@@ -93,6 +93,71 @@ func TestRelay_StampsEachCommandWithTheClientItCameFrom(t *testing.T) {
 	}
 }
 
+func TestRelay_CannotMarkItsOwnCommandInternal(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+	srv, wsURL := startTestDaemon(t)
+	defer srv.Close()
+	browser := &tabBrowser{}
+	defer browser.connect(t, wsURL, "Mozilla/5.0 Firefox/144.0", "p").Close()
+	waitFor(t, func() bool { return len(getOpenBrowsers()) == 1 })
+
+	a := dialRelay(t, wsURL, map[string]any{"key": "secret-1"})
+	defer a.conn.Close()
+	// _internal is the flag the extension reads to skip asking its user. A
+	// relay client that sets it would drive the browser with no prompt, so the
+	// daemon must strip it before the command reaches the browser.
+	a.call("click", map[string]any{"_internal": true})
+	got := browser.params("click")
+	if got["_internal"] != nil {
+		t.Errorf("a relay client marked its own command internal: %v", got)
+	}
+	if got["_client"] == nil {
+		t.Errorf("the command lost its stamp: %v", got)
+	}
+	// The same goes for the identity the prompt displays.
+	a.call("click", map[string]any{"_clientName": "spoofed", "_clientHue": 1})
+	if got := browser.params("click"); got["_clientName"] == "spoofed" || got["_clientHue"] == float64(1) {
+		t.Errorf("a relay client named itself: %v", got)
+	}
+}
+
+func TestRawArgs_StripsServerOwnedKeys(t *testing.T) {
+	// No tool takes an underscore-prefixed argument; every one of these is the
+	// daemon's to set (see reservedParam). An agent that can set them can skip
+	// the approval gate or write its own consent prompt.
+	got := rawArgs(map[string]any{
+		"tabId":       4,
+		"intent":      "Clicking submit",
+		"_internal":   true,
+		"_client":     map[string]any{"id": "already-approved"},
+		"_clientName": "spoofed",
+		"_intent":     "forged narration",
+	})
+	for _, k := range []string{"_internal", "_client", "_clientName"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("%s survived rawArgs: %v", k, got)
+		}
+	}
+	if got["tabId"] != 4 {
+		t.Errorf("tabId was dropped: %v", got)
+	}
+	if got["_intent"] != "Clicking submit" {
+		t.Errorf("the agent's own intent should be rewritten as _intent, got %v", got["_intent"])
+	}
+
+	// The no-intent path used to hand back the caller's own map, so sendDirect
+	// would stamp identity by mutating the arguments the agent supplied.
+	args := map[string]any{"_internal": true}
+	if out := rawArgs(args); len(out) != 0 {
+		t.Errorf("reserved keys survived without an intent: %v", out)
+	}
+	if len(args) != 1 {
+		t.Error("rawArgs must not mutate the caller's map")
+	}
+}
+
 func TestSendDirect_StampsTheLocalAgentAndMarksItsOwnBookkeeping(t *testing.T) {
 	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, _ string) {
 		if _, err := send("click", map[string]any{"tabId": zenPrefix + ":8"}, 5000); err != nil {
@@ -116,6 +181,56 @@ func TestSendDirect_StampsTheLocalAgentAndMarksItsOwnBookkeeping(t *testing.T) {
 		}
 		if zen.params("list_tabs")["_internal"] != true || ff.params("list_tabs")["_client"] != nil {
 			t.Errorf("internal list_tabs params = %v", zen.params("list_tabs"))
+		}
+	})
+}
+
+func TestListTabs_ReportsARefusalInsteadOfAnEmptyList(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
+		// Every browser refuses: the agent must learn it was denied. Answering
+		// "no tabs open" would leave it with no reason to stop asking.
+		refusal := `The user declined to let "Claude" use this browser. What to do: stop calling browser tools.`
+		zen.listErr, ff.listErr = refusal, refusal
+		_, err := sendListTabs(getOpenBrowsers(), 5000, map[string]any{"_client": map[string]any{"id": "a1"}})
+		if err == nil || !strings.Contains(err.Error(), "declined") {
+			t.Fatalf("a denial came back as %v", err)
+		} else if !strings.Contains(err.Error(), "What to do:") {
+			t.Errorf("the refusal should keep the extension's advice, got %v", err)
+		}
+
+		// The daemon's own refresh has nobody waiting on it, so it stays quiet.
+		if _, err := sendListTabs(getOpenBrowsers(), 5000, internalParams()); err != nil {
+			t.Errorf("an internal refresh should not fail: %v", err)
+		}
+
+		// One browser answering is still a result.
+		zen.listErr, ff.listErr = "", ""
+		zen.tabs, ff.tabs = []int{7}, []int{8}
+		if _, err := sendListTabs(getOpenBrowsers(), 5000, map[string]any{"_client": map[string]any{"id": "a1"}}); err != nil {
+			t.Errorf("got %v", err)
+		}
+	})
+}
+
+func TestIntroduce_DoesNotClaimApprovalWhenNoOneWasAsked(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
+		// An extension from before the approval feature cannot ask its user.
+		// Saying "the user approved you" would invent a consent nobody gave.
+		old := func() map[string]any { return map[string]any{"error": "Unknown action: approve_agent"} }
+		zen.approve, ff.approve = old, old
+		res, err := handleIntroduce(context.Background(), reqWith(map[string]any{"name": "Claude", "task": "Sorting tabs"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := extractText(t, res)
+		if res.IsError {
+			t.Fatalf("an old extension should not block introduce, got %q", text)
+		}
+		if strings.Contains(text, "The user approved you in") {
+			t.Errorf("claimed approval nobody gave: %q", text)
+		}
+		if !strings.Contains(text, "too old to ask") {
+			t.Errorf("should say the extension cannot ask, got %q", text)
 		}
 	})
 }

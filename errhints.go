@@ -39,6 +39,10 @@ var errorHints = []struct {
 			"scroll, extract_text, get_html, capture_page) work without it on the same tab, so use those. " +
 			"connect_bidi attaches to the user's own browser if they started it with --remote-debugging-port; " +
 			"launch_browser is not a substitute, since it opens an empty profile without the user's tabs or logins."},
+	{regexp.MustCompile(`(?i)^timeout after \d+ms: approve_agent`),
+		"nobody answered the approval prompt in time. Tell the user a window is waiting for their decision and ask " +
+			"them to answer it, then call introduce again, which waits for their answer. Do not retry other browser " +
+			"tools meanwhile: without approval they are refused."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
 		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
 			"page_reload the tab, or open_tab with its URL and work in the new tab."},

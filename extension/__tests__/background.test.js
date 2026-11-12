@@ -1338,6 +1338,9 @@ describe('agent approval', () => {
     // Not even by introducing itself again straight away.
     await expect(api.ensureApproved(agent(), { explicit: true })).rejects.toThrow(/declined/);
     expect(chrome.windows.create).toHaveBeenCalledTimes(1);
+    // The refusal is the brake that stops a declined agent re-prompting, so it
+    // has to outlive the service worker that recorded it.
+    expect(chrome.storage.session._data.deniedAgents).toHaveProperty('a1');
   });
 
   it('lets a declined agent ask again only after a pause, and only by introducing itself', async () => {
@@ -1426,6 +1429,8 @@ describe('agent approval', () => {
     expect(chrome.tabs.query).not.toHaveBeenCalled();
 
     // The daemon's own bookkeeping is not an agent and is not asked about.
+    // Only the daemon can reach this branch: it strips `_internal` from
+    // every command an agent supplies, which the Go tests cover.
     ws.send.mockClear();
     ws._receive({ id: '8', action: 'list_tabs', params: { _internal: true } });
     await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());

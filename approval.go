@@ -82,19 +82,39 @@ func localClientStamp() map[string]any {
 }
 
 // internalParams marks a command the daemon sends for its own bookkeeping
-// (refreshing which browser owns which tab). No agent sees the result, so
-// the browser does not ask anyone to approve it.
-func internalParams() map[string]any {
-	return map[string]any{"_internal": true}
+// (refreshing which browser owns which tab, naming the browser it is talking
+// to). No agent sees the result, so the browser does not ask anyone to approve
+// it. Callers that need extra fields pass them as alternating key/value pairs.
+//
+// Every use of this must be a call site the daemon itself chose — never one an
+// agent can steer. rawArgs strips `_internal` from tool arguments and the relay
+// handler strips it from raw relay params for exactly that reason.
+func internalParams(kv ...any) map[string]any {
+	p := map[string]any{"_internal": true}
+	for i := 0; i+1 < len(kv); i += 2 {
+		k, ok := kv[i].(string)
+		if !ok {
+			continue
+		}
+		p[k] = kv[i+1]
+	}
+	return p
 }
 
 // sendApproveAgent asks every connected browser to approve the calling
 // agent and returns as soon as one does. The others keep their prompt open;
 // each browser enforces its own answer when a command reaches it.
+//
+// A browser running an extension from before this feature answers "Unknown
+// action". That is not an approval: it cannot ask, and it cannot enforce
+// either, so there is nothing to wait for — but reporting it as consent would
+// tell the agent a human said yes when nobody was ever asked. It is returned
+// as `unsupported` instead, and the caller words its message accordingly.
 func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout int) (json.RawMessage, error) {
 	type answer struct {
-		browser string
-		err     error
+		browser     string
+		err         error
+		unsupported bool
 	}
 	answers := make(chan answer, len(open))
 	for _, bc := range open {
@@ -105,21 +125,25 @@ func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout 
 		}
 		go func(bc *BrowserConnection) {
 			_, err := sendTo(bc, "approve_agent", p, timeout)
-			// An extension from before this feature cannot ask and does not
-			// enforce anything either, so there is nothing to wait for.
-			if err != nil && strings.Contains(err.Error(), "Unknown action") {
-				err = nil
-			}
-			answers <- answer{bc.tabPrefix(), err}
+			unsupported := err != nil && strings.Contains(err.Error(), "Unknown action")
+			answers <- answer{bc.tabPrefix(), err, unsupported}
 		}(bc)
 	}
-	var failures []string
+	var failures, unsupported []string
 	for range open {
 		a := <-answers
-		if a.err == nil {
+		switch {
+		case a.err == nil:
 			return json.Marshal(map[string]any{"approved": true, "browser": a.browser})
+		case a.unsupported:
+			unsupported = append(unsupported, a.browser)
+		default:
+			failures = append(failures, a.browser+": "+a.err.Error())
 		}
-		failures = append(failures, a.browser+": "+a.err.Error())
+	}
+	if len(unsupported) > 0 {
+		b, _ := json.Marshal(map[string]any{"approved": false, "unsupported": unsupported})
+		return b, nil
 	}
 	return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
 }
@@ -137,8 +161,19 @@ func requestApproval() (note string, err error) {
 		return "", err
 	}
 	var reply struct {
-		Browser string `json:"browser"`
+		Browser     string   `json:"browser"`
+		Unsupported []string `json:"unsupported"`
 	}
-	_ = json.Unmarshal(raw, &reply)
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return "", fmt.Errorf("could not read the browser's answer: %w", err)
+	}
+	if len(reply.Unsupported) > 0 {
+		return "The extension in " + strings.Join(reply.Unsupported, ", ") +
+			" is too old to ask its user, so nobody has approved you — it cannot enforce approval either. " +
+			"Your commands will run, but the human gets no say until the extension is updated.", nil
+	}
+	if reply.Browser == "" {
+		return "", fmt.Errorf("the browser answered without saying which one it was")
+	}
 	return "The user approved you in " + reply.Browser + ".", nil
 }

@@ -478,7 +478,13 @@ chrome.tabs.onActivated.addListener(() => {
 const APPROVAL_WAIT_MS = 120000;      // `introduce` waits this long for an answer
 const APPROVAL_LAZY_WAIT_MS = 15000;  // any other command waits this long, then reports
 const APPROVAL_REASK_MS = 30000;      // a declined agent cannot ask again sooner
-const approvals = { approved: new Map(), denied: new Map(), pending: new Map(), loaded: false };
+const approvals = {
+  approved: new Map(),
+  denied: new Map(),
+  pending: new Map(),
+  loaded: false,
+  loading: null, // in-flight loadApprovals promise, shared by concurrent callers
+};
 
 // takeClient removes the daemon's identity stamp from a command's params and
 // returns it. A daemon from before the stamp existed sends none: everything
@@ -514,17 +520,33 @@ async function approvalRequired() {
 }
 
 async function loadApprovals() {
+  // Latch only after the read finishes. Setting it first means a command that
+  // arrives while the storage read is in flight sees loaded:true, skips the
+  // hydration and its approved entry, and re-prompts a user who already said
+  // yes. Concurrent callers share the in-flight promise instead.
   if (approvals.loaded) return;
-  approvals.loaded = true;
-  try {
-    const got = await chrome.storage.session.get('approvedAgents');
-    for (const [id, v] of Object.entries(got.approvedAgents || {})) approvals.approved.set(id, v);
-  } catch {} // no session storage: approvals last as long as this script does
+  if (approvals.loading) return approvals.loading;
+  approvals.loading = (async () => {
+    try {
+      const got = await chrome.storage.session.get(['approvedAgents', 'deniedAgents']);
+      for (const [id, v] of Object.entries(got.approvedAgents || {})) approvals.approved.set(id, v);
+      for (const [id, v] of Object.entries(got.deniedAgents || {})) approvals.denied.set(id, v);
+      approvals.loaded = true;
+    } catch {
+      // No session storage: approvals last as long as this script does.
+      approvals.loaded = true;
+    } finally {
+      approvals.loading = null;
+    }
+  })();
+  return approvals.loading;
 }
 
 function saveApprovals() {
   try {
-    chrome.storage.session.set({ approvedAgents: Object.fromEntries(approvals.approved) }).catch(() => {});
+    chrome.storage.session
+      .set({ approvedAgents: Object.fromEntries(approvals.approved), deniedAgents: Object.fromEntries(approvals.denied) })
+      .catch(() => {});
   } catch {}
 }
 
@@ -604,6 +626,9 @@ function settleApproval(id, decision) {
     saveApprovals();
   } else if (decision === 'deny') {
     approvals.denied.set(id, Date.now());
+    // Persist the refusal too: it is the brake that stops a declined agent
+    // re-prompting, and an unpersisted one dies with the service worker.
+    saveApprovals();
   }
   entry.resolve(decision);
   updateApprovalBadge();
