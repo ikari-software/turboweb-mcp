@@ -6,9 +6,9 @@
     "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^5.1.0",
-    "jsdom": "^31.0.1",
-    "vitest": "^5.1.0",
-    "web-ext": "^10.8.0"
+    "vitest": "^3",
+    "@vitest/coverage-v8": "^3",
+    "jsdom": "^26",
+    "web-ext": "^8"
   }
 }
