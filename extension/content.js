@@ -1839,6 +1839,13 @@
         .badge .agent-name { color: hsl(var(--client-hue, 40), 78%, 48%); font-weight: 600; flex-shrink: 0; transition: color 220ms ease; }
         .badge .label { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge svg { flex-shrink: 0; }
+        /* Screenshot-clean mode: the screenshot tool hides the overlay's
+           text-bearing chrome (badge, toasts, handoff banner) so the
+           capture shows the page, not the agent's narration. Text-free
+           effects — cursor, ripples, highlights — stay visible. */
+        :host(.shot-clean) .badge,
+        :host(.shot-clean) .toast,
+        :host(.shot-clean) .handoff-banner { display: none !important; }
         .cursor {
           position: fixed; top: 0; left: 0;
           width: 24px; height: 24px;
@@ -3027,6 +3034,15 @@
       }
     }
 
+    // setTextHidden toggles screenshot-clean mode: a class on the host
+    // hides the text-bearing chrome (badge, toasts, handoff banner) while
+    // the cursor and other text-free effects stay. No-op before the first
+    // overlay render — nothing exists to hide yet.
+    function setTextHidden(hidden) {
+      if (!hostEl) return;
+      hostEl.classList.toggle('shot-clean', !!hidden);
+    }
+
     function scheduleIdleFade() {
       if (idleFadeTimer) clearTimeout(idleFadeTimer);
       idleFadeTimer = setTimeout(() => {
@@ -3042,7 +3058,7 @@
       }, IDLE_FADE_MS);
     }
 
-    return { showStart, showResult, showError, showHandoff, clearHandoff, unflagTitle };
+    return { showStart, showResult, showError, showHandoff, clearHandoff, unflagTitle, setTextHidden };
   })();
 
   // --- DOM-mutation signal (the cheap complement to the pixel diff) ------
@@ -3290,6 +3306,15 @@
       }
       if (payload.kind === 'handoff_clear') {
         overlay.clearHandoff();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (payload.kind === 'clean') {
+        // Screenshot support: hide/restore the text chrome around a
+        // capture. The reflow read forces style recalc so a capture
+        // issued immediately after this response can't race the toggle.
+        overlay.setTextHidden(payload.hidden);
+        void document.documentElement.offsetHeight;
         sendResponse({ ok: true });
         return;
       }
