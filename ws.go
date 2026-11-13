@@ -671,10 +671,59 @@ func getOpenBrowsers() []*BrowserConnection {
 	return open
 }
 
-// connectionStatusJSON reports the calling process's view of browser
-// connectivity. It must run in the process that actually owns the browser
-// WebSockets — the daemon — so connection_status routes here through send()
-// rather than reading a relay client's (always-empty) browsers map.
+// approvalSummary asks every connected browser where this agent stands, so the
+// agent can be told "you are pending/denied/approved" instead of being left to
+// infer it from failures. Read-only: the extension never opens a prompt for it.
+//
+// Each browser answers independently, so two browsers legitimately disagree;
+// the caller gets one entry per browser rather than a single collapsed verdict,
+// because the agent has to know which window to ask its user to answer.
+// Browsers on an extension too old to answer are left out.
+func approvalSummary(open []*BrowserConnection, stamp map[string]any) []map[string]any {
+	type answer struct {
+		at   int
+		body map[string]any
+		err  error
+	}
+	answers := make(chan answer, len(open))
+	for i, bc := range open {
+		// The stamp rides along so the browser can answer about *this* agent.
+		p := internalParams("_client", stamp)
+		go func(i int, bc *BrowserConnection) {
+			raw, err := sendTo(bc, "approval_state", p, 2000)
+			if err != nil {
+				answers <- answer{at: i, err: err}
+				return
+			}
+			var body map[string]any
+			if json.Unmarshal(raw, &body) != nil {
+				answers <- answer{at: i, err: fmt.Errorf("unreadable answer from %s", bc.tabPrefix())}
+				return
+			}
+			// Name the browser by the same ref list_tabs returns, so the agent
+			// can map an answer onto the browser it has to act in.
+			body["browser"] = bc.tabPrefix()
+			bc.mu.Lock()
+			body["name"] = bc.name
+			bc.mu.Unlock()
+			answers <- answer{at: i, body: body}
+		}(i, bc)
+	}
+	out := make([]map[string]any, 0, len(open))
+	for range open {
+		a := <-answers
+		if a.err != nil {
+			continue // an extension from before this feature cannot answer
+		}
+		out = append(out, a.body)
+	}
+	return out
+}
+
+// connectionStatusJSON returns the daemon's view of connectivity. It must run in
+// the process that actually owns the browser WebSockets — the daemon — so
+// connection_status routes here through send() rather than reading a relay
+// client's (always-empty) browsers map.
 func connectionStatusJSON() json.RawMessage {
 	open := getOpenBrowsers()
 	names := make([]string, len(open))
@@ -698,6 +747,16 @@ func connectionStatusJSON() json.RawMessage {
 	if u := peekUpdateStatus(); u != nil && u.UpdateAvailable {
 		status["updateAvailable"] = true
 		status["latestVersion"] = u.LatestVersion
+	}
+	// Where this agent stands. Without it a denied agent sees extension:true
+	// and every command refused, and has no way to tell that it is the one
+	// being turned away. Best-effort: an old extension answers nothing, and a
+	// diagnostic must never fail because a browser did not respond.
+	if len(open) > 0 {
+		status["approval"] = approvalSummary(open, localClientStamp())
+		if approvalSkipped() {
+			status["approvalSkipped"] = true
+		}
 	}
 	raw, _ := json.Marshal(status)
 	return raw
@@ -859,6 +918,12 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	// In-process mode: this process is the agent's own server.
 	if _, ok := params["_client"]; !ok {
 		params["_client"] = localClientStamp()
+	}
+	// Opting out of the browser's approval prompt is the host's decision, so
+	// only the daemon sets it — never a relay client or an agent argument.
+	// rawArgs and the relay handler both drop this key on the way in.
+	if approvalSkipped() {
+		params["_skipApproval"] = true
 	}
 	open := getOpenBrowsers()
 	if len(open) == 0 {

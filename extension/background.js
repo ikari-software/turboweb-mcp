@@ -339,6 +339,11 @@ function connect() {
     const client = takeClient(params, clientName || clientLabel);
     const internal = params._internal === true;
     delete params._internal;
+    // The daemon sets this when the host opted out of approval for unattended
+    // use (TURBOWEB_SKIP_APPROVAL). Like _internal it is daemon-only: the
+    // daemon strips both from anything an agent supplies.
+    const override = params._skipApproval === true;
+    delete params._skipApproval;
 
     const start = performance.now();
     stats.commands++;
@@ -356,10 +361,18 @@ function connect() {
 
     // Nothing an agent sends is acted on until the person at this browser
     // has let that agent in.
+    if (internal && msg.action === 'approval_state') {
+      // Read-only: never opens a window, never blocks. The daemon asks this on
+      // the agent's behalf so it can say where it stands instead of telling it
+      // to just retry.
+      const st = await approvalState(client);
+      ws?.send(JSON.stringify({ id: msg.id, result: st }));
+      return;
+    }
     if (!internal) {
       const asking = msg.action === 'approve_agent';
       try {
-        await ensureApproved(client, { explicit: asking, timeoutMs: params.timeoutMs });
+        await ensureApproved(client, { explicit: asking, timeoutMs: params.timeoutMs, override });
       } catch (e) {
         stats.errors++;
         logActivity({ ...baseEntry, status: 'error', duration: Math.round(performance.now() - start), error: e.message, timestamp: Date.now() });
@@ -550,21 +563,73 @@ function saveApprovals() {
   } catch {}
 }
 
+// approvalState reports where this agent stands without asking anyone: the
+// same four words ensureApproved reasons about, plus the message it would
+// throw. Kept in one place so the status an agent reads can never drift from
+// the refusal it experiences.
+//
+//   off        the user turned the prompt off; nothing is gated
+//   approved   the user let this agent in
+//   denied     the user refused it
+//   pending    a window is open and awaiting an answer
+//   needed     nobody has been asked yet
+async function approvalState(client) {
+  if (!(await approvalRequired())) return { state: 'off', decided: true };
+  await loadApprovals();
+  if (approvals.approved.has(client.id)) return { state: 'approved', decided: true };
+  if (approvals.denied.has(client.id)) {
+    return { state: 'denied', decided: true, message: approvalMessage(client, 'deny') };
+  }
+  if (approvals.pending.has(client.id)) return { state: 'pending', decided: false };
+  return { state: 'needed', decided: false };
+}
+
+// approvalMessage words what the agent should do about a given outcome. Every
+// one carries the "What to do:" marker so the daemon's errhints leave it be.
+function approvalMessage(client, decision) {
+  const who = JSON.stringify(client.name);
+  switch (decision) {
+    case 'deny':
+      return `The user declined to let ${who} use this browser. ` +
+        'What to do: stop calling browser tools and tell the user they declined. Do not retry, ' +
+        'and do not switch to another browser or automation tool.';
+    case 'override':
+      return `The user declined to let ${who} use this browser. ` +
+        'What to do: stop calling browser tools and tell the user they declined. Do not retry, ' +
+        'and do not switch to another browser or automation tool. ' +
+        '(TURBOWEB_SKIP_APPROVAL is set, but the user explicitly refused this agent.)';
+    case 'dismissed':
+      return `The approval window for ${who} was closed without an answer. ` +
+        'What to do: ask the user whether they want you to use their browser. If they do, call introduce again.';
+    case 'unavailable':
+      return `This browser could not open the approval window for ${who}. ` +
+        'What to do: tell the user; they can turn off "Ask before an agent connects" in the TurboWeb popup if they trust this setup.';
+    default:
+      return `The user has not yet approved ${who}: an approval window is open in their browser. ` +
+        'What to do: tell the user to answer it, then call introduce again, which waits for their decision.';
+  }
+}
+
 // ensureApproved resolves once the person has allowed this agent, and throws
 // with what the agent should do next otherwise. `explicit` is the agent
 // asking to be let in (introduce); any other command opens the same prompt
 // but does not wait as long, and never re-opens one after a "no".
-async function ensureApproved(client, { explicit = false, timeoutMs } = {}) {
+//
+// `_skipApproval` is set by the daemon when the host opted out
+// (TURBOWEB_SKIP_APPROVAL=1), for unattended setups like headless Chrome where
+// no window can be shown. A real refusal still wins: the opt-out means "don't
+// ask", not "ignore the answer".
+async function ensureApproved(client, { explicit = false, timeoutMs, override = false } = {}) {
   if (!(await approvalRequired())) return;
   await loadApprovals();
   if (approvals.approved.has(client.id)) return;
 
-  const who = JSON.stringify(client.name);
-  const declined = () => new Error(`The user declined to let ${who} use this browser. ` +
-    'What to do: stop calling browser tools and tell the user they declined. Do not retry, ' +
-    'and do not switch to another browser or automation tool.');
   const deniedAt = approvals.denied.get(client.id);
-  if (deniedAt && (!explicit || Date.now() - deniedAt < APPROVAL_REASK_MS)) throw declined();
+  if (override && deniedAt) throw new Error(approvalMessage(client, 'override'));
+  if (deniedAt && (!explicit || Date.now() - deniedAt < APPROVAL_REASK_MS)) {
+    throw new Error(approvalMessage(client, 'deny'));
+  }
+  if (override) return;
 
   let entry = approvals.pending.get(client.id);
   if (!entry) {
@@ -587,16 +652,13 @@ async function ensureApproved(client, { explicit = false, timeoutMs } = {}) {
     case 'allow':
       return;
     case 'deny':
-      throw declined();
+      throw new Error(approvalMessage(client, 'deny'));
     case 'dismissed':
-      throw new Error(`The approval window for ${who} was closed without an answer. ` +
-        'What to do: ask the user whether they want you to use their browser. If they do, call introduce again.');
+      throw new Error(approvalMessage(client, 'dismissed'));
     case 'unavailable':
-      throw new Error(`This browser could not open the approval window for ${who}. ` +
-        'What to do: tell the user; they can turn off "Ask before an agent connects" in the TurboWeb popup if they trust this setup.');
+      throw new Error(approvalMessage(client, 'unavailable'));
     default:
-      throw new Error(`The user has not yet approved ${who}: an approval window is open in their browser. ` +
-        'What to do: tell the user to answer it, then call introduce again, which waits for their decision.');
+      throw new Error(approvalMessage(client, 'waiting'));
   }
 }
 

@@ -185,6 +185,130 @@ func TestSendDirect_StampsTheLocalAgentAndMarksItsOwnBookkeeping(t *testing.T) {
 	})
 }
 
+func TestConnectionStatus_ReportsWhereTheAgentStands(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
+		var status map[string]any
+		read := func() []any {
+			raw, err := send("connection_status", nil, 3000)
+			if err != nil {
+				t.Fatalf("connection_status: %v", err)
+			}
+			status = map[string]any{}
+			if err := json.Unmarshal(raw, &status); err != nil {
+				t.Fatalf("connection_status is not an object: %v", err)
+			}
+			list, _ := status["approval"].([]any)
+			return list
+		}
+
+		// Both browsers answer, and the agent can tell pending from approved.
+		zen.approval, ff.approval = "pending", "approved"
+		list := read()
+		if len(list) != 2 {
+			t.Fatalf("expected one entry per browser, got %v (approval=%v)", len(list), status["approval"])
+		}
+		states := map[string]string{}
+		for _, e := range list {
+			m, _ := e.(map[string]any)
+			ref, _ := m["browser"].(string)
+			st, _ := m["state"].(string)
+			states[ref] = st
+		}
+		var pending, approved bool
+		for ref, st := range states {
+			switch {
+			case strings.HasPrefix(ref, "zen-") && st == "pending":
+				pending = true
+			case strings.HasPrefix(ref, "firefox-") && st == "approved":
+				approved = true
+			}
+		}
+		if !pending || !approved {
+			t.Errorf("states = %v, want zen pending and firefox approved", states)
+		}
+
+		// A browser on an old extension simply contributes nothing; it must not
+		// break a diagnostic or make the command look disconnected.
+		ff.approval = ""
+		if list := read(); len(list) != 1 {
+			t.Errorf("an old extension should be left out, got %v", list)
+		}
+		if status["extension"] != true {
+			t.Errorf("a silent approval probe must not make the browser look gone: %v", status)
+		}
+	})
+}
+
+func TestConnectionStatus_MarksTheSkipApprovalOptOut(t *testing.T) {
+	withZenAndFirefox(t, func(zen, _ *tabBrowser, _, _ string) {
+		zen.approval = "off"
+		t.Setenv("TURBOWEB_SKIP_APPROVAL", "1")
+		raw, err := send("connection_status", nil, 3000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status map[string]any
+		json.Unmarshal(raw, &status)
+		if status["approvalSkipped"] != true {
+			t.Errorf("an opted-out host should say so: %v", status)
+		}
+	})
+}
+
+func TestLaunchBrowser_HeadlessExplainsItCannotAskAnyone(t *testing.T) {
+	// No TURBOWEB_SKIP_APPROVAL: a headless window has nobody to answer the
+	// prompt, so refuse with the two ways out instead of hanging for 2 minutes.
+	// The guard is tested on its own — driving handleLaunchBrowser through this
+	// path launches a real browser process and leaves it running for the rest of
+	// the suite.
+	t.Setenv("TURBOWEB_SKIP_APPROVAL", "")
+	msg := headlessApprovalRefusal(true)
+	for _, want := range []string{"TURBOWEB_SKIP_APPROVAL=1", "headless:false", "What to do:"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal should mention %q, got %q", want, msg)
+		}
+	}
+	// A windowed launch is the normal case and is never refused.
+	if msg := headlessApprovalRefusal(false); msg != "" {
+		t.Errorf("a windowed launch should not be refused, got %q", msg)
+	}
+	// With the opt-out a headless launch is allowed through.
+	t.Setenv("TURBOWEB_SKIP_APPROVAL", "1")
+	if msg := headlessApprovalRefusal(true); msg != "" {
+		t.Errorf("the opt-out should let a headless launch through, got %q", msg)
+	}
+}
+
+func TestSendDirect_CarriesTheSkipApprovalOptOut(t *testing.T) {
+	withZenAndFirefox(t, func(zen, _ *tabBrowser, zenPrefix, _ string) {
+		// Absent by default: the browser asks the user.
+		if _, err := send("click", map[string]any{"tabId": zenPrefix + ":8"}, 5000); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := zen.params("click")["_skipApproval"]; ok {
+			t.Error("the opt-out must not be on unless the host asked for it")
+		}
+
+		t.Setenv("TURBOWEB_SKIP_APPROVAL", "1")
+		if _, err := send("click", map[string]any{"tabId": zenPrefix + ":8"}, 5000); err != nil {
+			t.Fatal(err)
+		}
+		if zen.params("click")["_skipApproval"] != true {
+			t.Errorf("the browser was not told about the opt-out: %v", zen.params("click"))
+		}
+	})
+}
+
+func TestRawArgs_StripsTheSkipApprovalOverride(t *testing.T) {
+	// An agent must not be able to hand itself a host-level opt-out.
+	if _, ok := rawArgs(map[string]any{"_skipApproval": true})["_skipApproval"]; ok {
+		t.Error("_skipApproval survived rawArgs")
+	}
+	if !reservedParam("_skipApproval") {
+		t.Error("_skipApproval must be reserved")
+	}
+}
+
 func TestListTabs_ReportsARefusalInsteadOfAnEmptyList(t *testing.T) {
 	withZenAndFirefox(t, func(zen, ff *tabBrowser, _, _ string) {
 		// Every browser refuses: the agent must learn it was denied. Answering

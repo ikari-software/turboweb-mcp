@@ -44,6 +44,11 @@ func loadBrowserConfig() {
 
 // launchBrowser starts a browser with stealth flags, the extension loaded, and BiDi enabled.
 func launchBrowser(headless bool) (int, error) {
+	// loadBrowserConfig normally runs at startup, but a caller can reach here
+	// before it does. Defaults are harmless; a nil dereference is not.
+	if browserConfig == nil {
+		loadBrowserConfig()
+	}
 	chromePath := browserConfig.ChromePath
 	if chromePath == "" {
 		chromePath = findChrome()
