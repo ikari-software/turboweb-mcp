@@ -1805,6 +1805,9 @@
       host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;--client-hue:40;';
       (document.body || document.documentElement).appendChild(host);
       hostEl = host;
+      // A screenshot-clean hide may already be outstanding (the refcount
+      // predates the first overlay render) — honour it from the start.
+      host.classList.toggle('shot-clean', cleanHides > 0);
 
       const sr = host.attachShadow({ mode: 'closed' });
 
@@ -3034,13 +3037,44 @@
       }
     }
 
-    // setTextHidden toggles screenshot-clean mode: a class on the host
-    // hides the text-bearing chrome (badge, toasts, handoff banner) while
-    // the cursor and other text-free effects stay. No-op before the first
-    // overlay render — nothing exists to hide yet.
+    // Screenshot-clean mode state. REFCOUNTED: concurrent captures (BiDi
+    // screenshot + extension screenshot_diff, two MCP clients on one
+    // daemon) each hide and restore around their own capture — a plain
+    // boolean would let the first restore re-show the text chrome while
+    // another capture is still mid-frame. The class stays on while any
+    // hide is outstanding.
+    let cleanHides = 0;
+    let cleanTimer = null;
+    // Safety ceiling on a hide with no matching restore — a crashed
+    // caller (or an agent that hides the narration chrome on purpose)
+    // must not suppress the badge/toasts for good. Captures take well
+    // under a second; 15s is generous.
+    const CLEAN_MAX_LIFE_MS = 15_000;
+
+    function applyClean() {
+      if (hostEl) hostEl.classList.toggle('shot-clean', cleanHides > 0);
+    }
+
+    // setTextHidden adjusts the clean-mode refcount (see above). The
+    // class is applied on the next ensure() if the overlay isn't
+    // rendered yet — nothing exists to hide before then anyway.
     function setTextHidden(hidden) {
-      if (!hostEl) return;
-      hostEl.classList.toggle('shot-clean', !!hidden);
+      if (hidden) {
+        cleanHides++;
+        if (cleanTimer) clearTimeout(cleanTimer);
+        cleanTimer = setTimeout(() => {
+          cleanHides = 0;
+          cleanTimer = null;
+          applyClean();
+        }, CLEAN_MAX_LIFE_MS);
+      } else {
+        cleanHides = Math.max(0, cleanHides - 1);
+        if (cleanHides === 0 && cleanTimer) {
+          clearTimeout(cleanTimer);
+          cleanTimer = null;
+        }
+      }
+      applyClean();
     }
 
     function scheduleIdleFade() {

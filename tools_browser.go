@@ -642,7 +642,9 @@ func handleScreenshot(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 			// captureVisibleTab. Do the same here; the cursor and text-free
 			// effects stay in the frame. Best-effort: a page with no content
 			// script has nothing to hide, and the extension already resolves
-			// overlay_clean ok there.
+			// overlay_clean ok there. The content script auto-restores after
+			// a ceiling, so a restore lost to a crash can't hide the chrome
+			// for good.
 			hideArgs := map[string]any{"tabId": args["tabId"], "hidden": true}
 			if _, hideErr := send("overlay_clean", hideArgs); hideErr != nil {
 				logger.Printf("overlay_clean hide failed (capturing with overlay text): %v", hideErr)

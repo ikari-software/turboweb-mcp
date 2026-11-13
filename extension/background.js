@@ -1892,6 +1892,9 @@ async function dispatch(action, params) {
       // asks here to hide/restore the overlay's text chrome around its
       // own capture. notifyOverlay already swallows unreached-content-script
       // errors, so this resolves ok on pages with no overlay at all.
+      // Trusted-surface note: any approved client can hide the narration
+      // chrome this way, but only momentarily — the content script
+      // refcounts hides and force-restores them after CLEAN_MAX_LIFE_MS.
       await notifyOverlay(params.tabId, { kind: 'clean', hidden: !!params.hidden });
       return { ok: true };
     }

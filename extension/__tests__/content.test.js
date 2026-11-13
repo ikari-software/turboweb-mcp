@@ -737,6 +737,40 @@ describe('overlay setTextHidden', () => {
     expect(style.textContent).toContain(':host(.shot-clean) .handoff-banner');
     expect(style.textContent).not.toContain(':host(.shot-clean) .cursor');
   });
+
+  it('refcounts overlapping hides — one restore cannot expose text mid-capture', () => {
+    const host = globalThis.__overlayHost;
+    api.overlay.setTextHidden(true);   // capture A hides
+    api.overlay.setTextHidden(true);   // capture B hides
+    api.overlay.setTextHidden(false);  // capture A restores...
+    // ...but B is still mid-frame: text chrome stays hidden.
+    expect(host.classList.contains('shot-clean')).toBe(true);
+    api.overlay.setTextHidden(false);  // B restores
+    expect(host.classList.contains('shot-clean')).toBe(false);
+  });
+
+  it('a restore with no matching hide does not drive the count negative', () => {
+    const host = globalThis.__overlayHost;
+    api.overlay.setTextHidden(false);
+    expect(host.classList.contains('shot-clean')).toBe(false);
+    // A following single hide must still need its own single restore.
+    api.overlay.setTextHidden(true);
+    api.overlay.setTextHidden(false);
+    expect(host.classList.contains('shot-clean')).toBe(false);
+  });
+
+  it('a never-restored hide times out instead of hiding the chrome for good', () => {
+    const host = globalThis.__overlayHost;
+    vi.useFakeTimers();
+    try {
+      api.overlay.setTextHidden(true);
+      expect(host.classList.contains('shot-clean')).toBe(true);
+      vi.advanceTimersByTime(16_000);
+      expect(host.classList.contains('shot-clean')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 // ============================================================
