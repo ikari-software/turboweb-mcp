@@ -637,7 +637,21 @@ func handleScreenshot(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	if getBiDi() != nil {
 		ctxID, err := resolveContext(args["tabId"])
 		if err == nil {
+			// BiDi captures bypass the extension's screenshot(), which hides
+			// the overlay's text chrome (badge, toasts, handoff banner) around
+			// captureVisibleTab. Do the same here; the cursor and text-free
+			// effects stay in the frame. Best-effort: a page with no content
+			// script has nothing to hide, and the extension already resolves
+			// overlay_clean ok there.
+			hideArgs := map[string]any{"tabId": args["tabId"], "hidden": true}
+			if _, hideErr := send("overlay_clean", hideArgs); hideErr != nil {
+				logger.Printf("overlay_clean hide failed (capturing with overlay text): %v", hideErr)
+			}
 			data, err := bidiScreenshot(ctx, ctxID, quality)
+			hideArgs["hidden"] = false
+			if _, showErr := send("overlay_clean", hideArgs); showErr != nil {
+				logger.Printf("overlay_clean restore failed: %v", showErr)
+			}
 			if err == nil {
 				encoded := base64Encode(data)
 				return &mcp.CallToolResult{
