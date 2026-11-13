@@ -79,6 +79,9 @@ type tabBrowser struct {
 	// listErr answers list_tabs with an error instead of a tab list (e.g. the
 	// refusal the extension sends when the agent was denied).
 	listErr string
+	// approval answers approval_state; empty means the browser cannot (an old
+	// extension), which is signalled as an error.
+	approval string
 }
 
 func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocket.Conn {
@@ -112,6 +115,11 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 				return b.approve()
 			}
 			return map[string]any{"result": map[string]any{"approved": true}}
+		case "approval_state":
+			if b.approval == "" {
+				return map[string]any{"error": "Unknown action: approval_state"}
+			}
+			return map[string]any{"result": map[string]any{"state": b.approval, "decided": true}}
 		case "wake_tab":
 			return map[string]any{"result": map[string]any{"id": params["tabId"], "loaded": true, "interactive": true}}
 		case "move_tabs":

@@ -30,6 +30,23 @@ func introduceRequired() bool {
 	return true
 }
 
+// approvalSkipped reports whether the host has opted out of the browser's
+// agent-approval prompt. Off by default: a person at the browser decides
+// whether an agent may drive it.
+//
+// Set TURBOWEB_SKIP_APPROVAL=1 for an unattended setup where nobody can answer
+// a window — headless Chrome, CI, a kiosk. The browser still records a refusal
+// the user gave explicitly, so the opt-out means "do not ask", not "ignore the
+// answer". This is not a security boundary: anything that can set this process's
+// environment can already run commands as its user.
+func approvalSkipped() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TURBOWEB_SKIP_APPROVAL"))) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
+}
+
 // hasIntroduced reports whether the agent has called `introduce`.
 func hasIntroduced() bool {
 	sessionMu.RLock()
