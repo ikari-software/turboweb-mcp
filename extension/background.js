@@ -1646,47 +1646,37 @@ async function screenshot(tabId, maxWidth = 1280, quality = 70) {
 
   const captureOpts = { format: 'jpeg', quality: Math.min(quality + 10, 100) };
 
-  // Hide the overlay's text chrome (badge, toasts, handoff banner) so the
-  // capture shows the page itself; the cursor and text-free effects stay.
-  // The BiDi path does the same via the 'overlay_clean' dispatch below.
-  await notifyOverlay(tid, { kind: 'clean', hidden: true });
-
   let dataUrl;
   try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
+  } catch (captureErr) {
+    // First failure: the tab may not have been fully painted yet (common in
+    // Firefox/Zen where the rendering pipeline needs longer after activation).
+    // Retry once after an extra 300 ms before escalating.
+    let retryDataUrl;
     try {
-      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
-    } catch (captureErr) {
-      // First failure: the tab may not have been fully painted yet (common in
-      // Firefox/Zen where the rendering pipeline needs longer after activation).
-      // Retry once after an extra 300 ms before escalating.
-      let retryDataUrl;
-      try {
-        await new Promise(r => setTimeout(r, 300));
-        retryDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
-      } catch {
-        retryDataUrl = null;
-      }
-
-      if (retryDataUrl) {
-        dataUrl = retryDataUrl;
-      } else if (chrome?.debugger) {
-        // Chrome headless/CI: captureVisibleTab requires an OS-focused window
-        // ("Missing activeTab permission").  CDP Page.captureScreenshot captures
-        // the rendering surface directly without that constraint.
-        try {
-          const cdp = await cdpSend(tid, 'Page.captureScreenshot', captureOpts);
-          dataUrl = 'data:image/jpeg;base64,' + cdp.data;
-        } catch {
-          throw captureErr; // CDP also failed — surface the original error
-        }
-      } else {
-        // Firefox: chrome.debugger not available — nothing left to try.
-        throw captureErr;
-      }
+      await new Promise(r => setTimeout(r, 300));
+      retryDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, captureOpts);
+    } catch {
+      retryDataUrl = null;
     }
-  } finally {
-    // Fire-and-forget: bring the text chrome back even when capture failed.
-    notifyOverlay(tid, { kind: 'clean', hidden: false });
+
+    if (retryDataUrl) {
+      dataUrl = retryDataUrl;
+    } else if (chrome?.debugger) {
+      // Chrome headless/CI: captureVisibleTab requires an OS-focused window
+      // ("Missing activeTab permission").  CDP Page.captureScreenshot captures
+      // the rendering surface directly without that constraint.
+      try {
+        const cdp = await cdpSend(tid, 'Page.captureScreenshot', captureOpts);
+        dataUrl = 'data:image/jpeg;base64,' + cdp.data;
+      } catch {
+        throw captureErr; // CDP also failed — surface the original error
+      }
+    } else {
+      // Firefox: chrome.debugger not available — nothing left to try.
+      throw captureErr;
+    }
   }
 
   let result;
@@ -1885,15 +1875,6 @@ async function dispatch(action, params) {
 
     case 'screenshot': {
       return await screenshot(params.tabId, params.maxWidth, params.quality);
-    }
-
-    case 'overlay_clean': {
-      // BiDi screenshots bypass this file's screenshot(), so the Go layer
-      // asks here to hide/restore the overlay's text chrome around its
-      // own capture. notifyOverlay already swallows unreached-content-script
-      // errors, so this resolves ok on pages with no overlay at all.
-      await notifyOverlay(params.tabId, { kind: 'clean', hidden: !!params.hidden });
-      return { ok: true };
     }
 
     case 'execute_js': {
