@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.16.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.15.0...v1.16.0) (2026-11-13)
+
+
+### Features
+
+* ask the browser's user before an agent may connect ([#39](https://github.com/ikari-software/turboweb-mcp/issues/39)) ([372486e](https://github.com/ikari-software/turboweb-mcp/commit/372486ef2cf8d202737b1dff9a177eeffb42d9db))
+* hide overlay text chrome in screenshots ([ab06508](https://github.com/ikari-software/turboweb-mcp/commit/ab06508ac314c12e8a8a9b5d786e83fac12bbbaf))
+
+
+### Bug Fixes
+
+* let an agent see, and a headless host skip, the approval gate ([#41](https://github.com/ikari-software/turboweb-mcp/issues/41)) ([0678e6d](https://github.com/ikari-software/turboweb-mcp/commit/0678e6d2fb2ae847546b9e25562d750d17202f2d))
+* review follow-ups for tab management (stale tab ids, BiDi-only list_tabs, move_tabs at the pinned boundary) ([#37](https://github.com/ikari-software/turboweb-mcp/issues/37)) ([6197120](https://github.com/ikari-software/turboweb-mcp/commit/6197120a347289b2118d9c1b6402215105da71df))
+* warn that a debug port changes a Firefox profile's settings for good ([#40](https://github.com/ikari-software/turboweb-mcp/issues/40)) ([369d660](https://github.com/ikari-software/turboweb-mcp/commit/369d6600f5d6b41e6d86d420025249bb62e94988))
+
 ## [1.15.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.14.0...v1.15.0) (2026-11-11)
 
 
