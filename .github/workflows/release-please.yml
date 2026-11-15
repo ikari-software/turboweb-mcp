@@ -15,6 +15,9 @@ name: release-please
 #      SHA256SUMS. Same workflow file, so the cosign certificate identity users
 #      verify against (SECURITY.md) is unchanged.
 #   4. publish: flips the draft to published + latest.
+#   5. chrome-web-store: uploads the store zip and submits it for review, so
+#      Chrome users on the published extension get the update. Skips when the
+#      CWS_* secrets are unset (see chrome-web-store.yml).
 #
 # Tokens: PRs opened with the default GITHUB_TOKEN don't trigger CI, so the
 # required checks never run on the release PR. Add a RELEASE_PLEASE_TOKEN
@@ -135,3 +138,15 @@ jobs:
           gh release edit "${{ needs.release-please.outputs.tag_name }}" \
             --repo "${{ github.repository }}" \
             --draft=false --latest
+
+  # Chrome extensions have no self-hosted update channel, so the store is the
+  # only way a published build reaches existing users. Runs after the release
+  # is public rather than in the `build` job (which runs against a draft): if
+  # the store submission fails, the GitHub release is already out and the run
+  # can be re-dispatched without cutting another version.
+  chrome-web-store:
+    needs: [release-please, publish]
+    uses: ./.github/workflows/chrome-web-store.yml
+    with:
+      version: ${{ needs.release-please.outputs.version }}
+    secrets: inherit

@@ -32,3 +32,4 @@ nc_disclosure_training_transcript.txt
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+.beads.gate.lock

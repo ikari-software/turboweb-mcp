@@ -1,0 +1,129 @@
+name: chrome-web-store
+
+# Publishes the built extension to the Chrome Web Store.
+#
+# Called by release-please.yml once a release has been published, so the store
+# version always matches the tag. Also dispatchable on its own to re-submit a
+# version that was rejected, without cutting a new release.
+#
+# Why this exists: unlike Firefox (which self-hosts its update manifest via
+# `update_url` + firefox-updates.json), Chrome extensions have no self-hosted
+# auto-update channel — outside enterprise policy, the Chrome Web Store *is*
+# the update channel. See CHROME_STORE.md.
+#
+# ---------------------------------------------------------------------------
+# One-time setup (all of it is the publisher's, not this workflow's)
+# ---------------------------------------------------------------------------
+#   1. $5 developer account + 2-step verification on the owning Google account
+#      (2FA is mandatory before the API will publish).
+#   2. Upload the FIRST version by hand in the Developer Dashboard, and fill in
+#      the Store listing and Privacy tabs. The API cannot create items and
+#      cannot write listing metadata — only the package and its review state.
+#   3. Create a Google Cloud service account, enable the Chrome Web Store API,
+#      then add the service account's email under Account in the Developer
+#      Dashboard. One service account per publisher.
+#   4. Grant that service account roles/iam.serviceAccountTokenCreator **on
+#      itself** — a bare key cannot mint an access token without it.
+#   5. Repository secrets:
+#        CWS_SA_JSON         the service account's JSON key, verbatim
+#        CWS_PUBLISHER_ID    from .../publishers/<id>/ in the dashboard URL
+#        CWS_ITEM_ID         the 32-character extension id
+#
+# Without those secrets the job prints a skip notice and exits 0, the same
+# contract `make extension-xpi` keeps for AMO credentials.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version being released (e.g. 1.15.0)"
+        required: true
+        type: string
+      publish_type:
+        description: "DEFAULT_PUBLISH (live on approval) or STAGED_PUBLISH (park in review)"
+        required: false
+        type: string
+        default: DEFAULT_PUBLISH
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish; must match the tag's VERSION"
+        required: true
+      publish_type:
+        description: "DEFAULT_PUBLISH or STAGED_PUBLISH"
+        required: false
+        default: DEFAULT_PUBLISH
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension deps
+        working-directory: extension
+        run: npm ci
+
+      - name: Build the store package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "$file_version" != "$VERSION" ]; then
+            echo "::error::VERSION is '$file_version' but this run was for '$VERSION'"
+            exit 1
+          fi
+          make chrome-store
+          zip="dist/turboweb-mcp-by-ikari-chrome-store-${VERSION}.zip"
+          [ -f "$zip" ] || { echo "::error::make chrome-store produced no $zip"; exit 1; }
+          # The store needs manifest.json at the archive root; a regression in
+          # the Makefile would otherwise only surface as a rejected upload.
+          unzip -l "$zip" | awk 'NF >= 4 { print $4 }' | grep -qx manifest.json \
+            || { echo "::error::manifest.json is not at the zip root"; exit 1; }
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+
+      - name: Skip when Chrome Web Store credentials are absent
+        id: creds
+        env:
+          CWS_SA_JSON: ${{ secrets.CWS_SA_JSON }}
+        run: |
+          if [ -z "$CWS_SA_JSON" ]; then
+            echo "::warning::CWS_SA_JSON not set — skipping Chrome Web Store publish"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Scopes are comma-separated per the action's documented format. The
+      # access_token output is the raw OAuth2 token; auth_token is a different
+      # thing (a self-signed JWT) and is not accepted by this API.
+      - name: Authenticate to the Chrome Web Store API
+        if: steps.creds.outputs.configured == 'true'
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.CWS_SA_JSON }}
+          token_format: access_token
+          access_token_scopes: 'https://www.googleapis.com/auth/chromewebstore'
+          access_token_lifetime: '3600s'
+          # The extension build needs no GCP project; don't export the extra
+          # environment variables other steps might misread.
+          export_environment_variables: 'false'
+
+      - name: Upload and submit for review
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CWS_ITEM_ID: ${{ secrets.CWS_ITEM_ID }}
+          CWS_PUBLISH_TYPE: ${{ inputs.publish_type }}
+        run: scripts/publish-chrome-store.sh "$ZIP"
