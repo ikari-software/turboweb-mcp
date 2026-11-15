@@ -1805,6 +1805,9 @@
       host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;--client-hue:40;';
       (document.body || document.documentElement).appendChild(host);
       hostEl = host;
+      // A screenshot-clean hide may already be outstanding (the refcount
+      // predates the first overlay render) — honour it from the start.
+      host.classList.toggle('shot-clean', cleanHides > 0);
 
       const sr = host.attachShadow({ mode: 'closed' });
 
@@ -1839,6 +1842,13 @@
         .badge .agent-name { color: hsl(var(--client-hue, 40), 78%, 48%); font-weight: 600; flex-shrink: 0; transition: color 220ms ease; }
         .badge .label { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .badge svg { flex-shrink: 0; }
+        /* Screenshot-clean mode: the screenshot tool hides the overlay's
+           text-bearing chrome (badge, toasts, handoff banner) so the
+           capture shows the page, not the agent's narration. Text-free
+           effects — cursor, ripples, highlights — stay visible. */
+        :host(.shot-clean) .badge,
+        :host(.shot-clean) .toast,
+        :host(.shot-clean) .handoff-banner { display: none !important; }
         .cursor {
           position: fixed; top: 0; left: 0;
           width: 24px; height: 24px;
@@ -3027,6 +3037,46 @@
       }
     }
 
+    // Screenshot-clean mode state. REFCOUNTED: concurrent captures (BiDi
+    // screenshot + extension screenshot_diff, two MCP clients on one
+    // daemon) each hide and restore around their own capture — a plain
+    // boolean would let the first restore re-show the text chrome while
+    // another capture is still mid-frame. The class stays on while any
+    // hide is outstanding.
+    let cleanHides = 0;
+    let cleanTimer = null;
+    // Safety ceiling on a hide with no matching restore — a crashed
+    // caller (or an agent that hides the narration chrome on purpose)
+    // must not suppress the badge/toasts for good. Captures take well
+    // under a second; 15s is generous.
+    const CLEAN_MAX_LIFE_MS = 15_000;
+
+    function applyClean() {
+      if (hostEl) hostEl.classList.toggle('shot-clean', cleanHides > 0);
+    }
+
+    // setTextHidden adjusts the clean-mode refcount (see above). The
+    // class is applied on the next ensure() if the overlay isn't
+    // rendered yet — nothing exists to hide before then anyway.
+    function setTextHidden(hidden) {
+      if (hidden) {
+        cleanHides++;
+        if (cleanTimer) clearTimeout(cleanTimer);
+        cleanTimer = setTimeout(() => {
+          cleanHides = 0;
+          cleanTimer = null;
+          applyClean();
+        }, CLEAN_MAX_LIFE_MS);
+      } else {
+        cleanHides = Math.max(0, cleanHides - 1);
+        if (cleanHides === 0 && cleanTimer) {
+          clearTimeout(cleanTimer);
+          cleanTimer = null;
+        }
+      }
+      applyClean();
+    }
+
     function scheduleIdleFade() {
       if (idleFadeTimer) clearTimeout(idleFadeTimer);
       idleFadeTimer = setTimeout(() => {
@@ -3042,7 +3092,7 @@
       }, IDLE_FADE_MS);
     }
 
-    return { showStart, showResult, showError, showHandoff, clearHandoff, unflagTitle };
+    return { showStart, showResult, showError, showHandoff, clearHandoff, unflagTitle, setTextHidden };
   })();
 
   // --- DOM-mutation signal (the cheap complement to the pixel diff) ------
@@ -3290,6 +3340,15 @@
       }
       if (payload.kind === 'handoff_clear') {
         overlay.clearHandoff();
+        sendResponse({ ok: true });
+        return;
+      }
+      if (payload.kind === 'clean') {
+        // Screenshot support: hide/restore the text chrome around a
+        // capture. The reflow read forces style recalc so a capture
+        // issued immediately after this response can't race the toggle.
+        overlay.setTextHidden(payload.hidden);
+        void document.documentElement.offsetHeight;
         sendResponse({ ok: true });
         return;
       }

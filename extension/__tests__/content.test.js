@@ -707,6 +707,73 @@ describe('handoff overlay', () => {
 });
 
 // ============================================================
+// overlay.setTextHidden — screenshot-clean mode
+// ============================================================
+describe('overlay setTextHidden', () => {
+  it('toggles the shot-clean class on the overlay host', async () => {
+    // Render something so the overlay host exists.
+    await api.overlay.showHandoff({
+      el: null, x: 50, y: 50,
+      bbox: { left: 40, top: 40, width: 20, height: 20 },
+      hint: 'clean me',
+    });
+    const host = globalThis.__overlayHost;
+    expect(host).not.toBeNull();
+
+    api.overlay.setTextHidden(true);
+    expect(host.classList.contains('shot-clean')).toBe(true);
+
+    api.overlay.setTextHidden(false);
+    expect(host.classList.contains('shot-clean')).toBe(false);
+
+    api.overlay.clearHandoff();
+  });
+
+  it('the clean-mode rule hides text chrome but not the cursor', () => {
+    const host = globalThis.__overlayHost;
+    const style = host.shadowRoot.querySelector('style');
+    expect(style.textContent).toContain(':host(.shot-clean) .badge');
+    expect(style.textContent).toContain(':host(.shot-clean) .toast');
+    expect(style.textContent).toContain(':host(.shot-clean) .handoff-banner');
+    expect(style.textContent).not.toContain(':host(.shot-clean) .cursor');
+  });
+
+  it('refcounts overlapping hides — one restore cannot expose text mid-capture', () => {
+    const host = globalThis.__overlayHost;
+    api.overlay.setTextHidden(true);   // capture A hides
+    api.overlay.setTextHidden(true);   // capture B hides
+    api.overlay.setTextHidden(false);  // capture A restores...
+    // ...but B is still mid-frame: text chrome stays hidden.
+    expect(host.classList.contains('shot-clean')).toBe(true);
+    api.overlay.setTextHidden(false);  // B restores
+    expect(host.classList.contains('shot-clean')).toBe(false);
+  });
+
+  it('a restore with no matching hide does not drive the count negative', () => {
+    const host = globalThis.__overlayHost;
+    api.overlay.setTextHidden(false);
+    expect(host.classList.contains('shot-clean')).toBe(false);
+    // A following single hide must still need its own single restore.
+    api.overlay.setTextHidden(true);
+    api.overlay.setTextHidden(false);
+    expect(host.classList.contains('shot-clean')).toBe(false);
+  });
+
+  it('a never-restored hide times out instead of hiding the chrome for good', () => {
+    const host = globalThis.__overlayHost;
+    vi.useFakeTimers();
+    try {
+      api.overlay.setTextHidden(true);
+      expect(host.classList.contains('shot-clean')).toBe(true);
+      vi.advanceTimersByTime(16_000);
+      expect(host.classList.contains('shot-clean')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ============================================================
 // typeText()
 // ============================================================
 describe('typeText', () => {

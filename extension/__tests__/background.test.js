@@ -1228,6 +1228,82 @@ describe('dispatch', () => {
 });
 
 // ============================================================
+// screenshot — overlay text chrome is hidden around the capture
+// ============================================================
+describe('screenshot overlay clean mode', () => {
+  // notifyOverlay resolves via the sendMessage callback; ensureContentScript
+  // resolves via the returned promise. One implementation serving both.
+  function mockContentReachable() {
+    chrome.tabs.sendMessage.mockImplementation((_id, _msg, _opts, cb) => {
+      if (cb) cb({ ok: true });
+      return Promise.resolve({ ok: true });
+    });
+  }
+
+  const cleanPayloads = () => chrome.tabs.sendMessage.mock.calls
+    .filter(c => c[1]?.action === '__turbo_overlay')
+    .map(c => c[1].payload);
+
+  it('hides overlay text chrome before capture and restores after', async () => {
+    mockContentReachable();
+    chrome.tabs.get.mockResolvedValue({ id: 5, windowId: 12, url: 'https://x' });
+    // Native resizer available → skips resizeLocal (its canvas mocks can't
+    // round-trip a real Blob in this env).
+    globalThis.fetch.mockImplementation((url) => {
+      const u = String(url);
+      if (u.endsWith('/health')) return Promise.resolve({ ok: true });
+      if (u.endsWith('/resize-b64')) {
+        return Promise.resolve({ json: () => Promise.resolve({ data: 'AAAA', width: 1280, height: 800 }) });
+      }
+      return Promise.resolve({ ok: false });
+    });
+    const result = await api.dispatch('screenshot', { tabId: 5 });
+
+    expect(cleanPayloads()).toEqual([
+      { kind: 'clean', hidden: true },
+      { kind: 'clean', hidden: false },
+    ]);
+    // The hide landed before the capture; the cursor stays (no other
+    // overlay kinds are sent).
+    const hideCall = chrome.tabs.sendMessage.mock.calls.findIndex(c => c[1]?.payload?.hidden === true);
+    expect(chrome.tabs.sendMessage.mock.invocationCallOrder[hideCall])
+      .toBeLessThan(chrome.tabs.captureVisibleTab.mock.invocationCallOrder[0]);
+    expect(result).toHaveProperty('base64');
+  });
+
+  it('restores the text chrome even when every capture path fails', async () => {
+    mockContentReachable();
+    chrome.tabs.get.mockResolvedValue({ id: 5, windowId: 12, url: 'https://x' });
+    chrome.tabs.captureVisibleTab.mockRejectedValue(new Error('no focus'));
+    chrome.debugger.sendCommand.mockImplementation((_t, _m, _p, cb) => {
+      chrome.runtime._lastError = { message: 'cdp down' };
+      cb(undefined);
+      chrome.runtime._lastError = null;
+    });
+
+    await expect(api.dispatch('screenshot', { tabId: 5 })).rejects.toThrow('no focus');
+    // The restore is fire-and-forget inside a finally — let it land.
+    await new Promise(r => setTimeout(r, 0));
+    expect(cleanPayloads()).toEqual([
+      { kind: 'clean', hidden: true },
+      { kind: 'clean', hidden: false },
+    ]);
+  });
+
+  it('overlay_clean forwards hidden to the page overlay (BiDi path support)', async () => {
+    mockContentReachable();
+    const res = await api.dispatch('overlay_clean', { tabId: 5, hidden: true });
+    expect(res).toEqual({ ok: true });
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      5,
+      { action: '__turbo_overlay', payload: { kind: 'clean', hidden: true } },
+      { frameId: 0 },
+      expect.any(Function),
+    );
+  });
+});
+
+// ============================================================
 // prepare_for_user_click — gating
 // ============================================================
 describe('prepare_for_user_click gating', () => {
