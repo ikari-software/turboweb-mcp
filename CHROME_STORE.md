@@ -31,9 +31,9 @@ Upload that zip in the CWS dashboard.
 2. **Verified contact email** and (for the data-disclosure form) a hosted
    **privacy policy URL**. The page is [`landing/privacy.html`](landing/privacy.html),
    served by `.github/workflows/pages.yml` as
-   `https://ikari-software.github.io/turboweb-mcp/privacy.html`. It must be
-   committed before that URL resolves — `pages.yml` only runs on pushes that
-   touch `landing/`.
+   `https://ikari-software.github.io/turboweb-mcp/privacy.html` — live and
+   returning 200. Note `pages.yml` only runs on pushes that touch `landing/`,
+   so an edit to the page needs a commit under that path to go out.
 
 ## Listing assets to prepare
 

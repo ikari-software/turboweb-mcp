@@ -189,7 +189,7 @@ screenshot, which is what CWS wants here.
       the submitted package. Note shot 4's popup still reads `v1.5.0` from
       the build it was captured against; refresh it if the version string in
       the popup is part of what you want to advertise.
-- [ ] Privacy policy URL resolves publicly (200, not a login wall).
-      `landing/privacy.html` is written but **not yet committed**, so
-      `pages.yml` has not deployed it and the URL currently 404s. Commit and
-      push, then `curl -sI` the URL before pasting it into the dashboard.
+- [x] Privacy policy URL resolves publicly (200, not a login wall).
+      **Done** — `landing/privacy.html` is on master, `pages.yml` deployed
+      it, and `https://ikari-software.github.io/turboweb-mcp/privacy.html`
+      returns 200 with no login wall. Safe to paste into the dashboard.
