@@ -17,8 +17,7 @@
     "scripting",
     "debugger",
     "alarms",
-    "storage",
-    "webNavigation"
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
