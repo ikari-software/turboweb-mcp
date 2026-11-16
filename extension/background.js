@@ -1695,10 +1695,20 @@ async function resizeNative(base64, maxWidth, quality) {
   return await resp.json(); // { data, width, height }
 }
 
+// Decode a base64 data: URL without fetch(): the Firefox build's CSP limits
+// connect-src to the loopback ports, which blocks fetch('data:...') with
+// "NetworkError when attempting to fetch resource".
+function dataUrlToBlob(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const mime = dataUrl.slice(5, comma).split(';')[0] || 'application/octet-stream';
+  const bin = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
 async function resizeLocal(dataUrl, maxWidth, quality) {
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
+  const bitmap = await createImageBitmap(dataUrlToBlob(dataUrl));
 
   let w = bitmap.width;
   let h = bitmap.height;
