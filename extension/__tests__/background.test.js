@@ -34,7 +34,8 @@ beforeAll(() => {
       return { drawImage: vi.fn() };
     }
     convertToBlob() {
-      return Promise.resolve(new Blob(['fake'], { type: 'image/jpeg' }));
+      // jsdom's Blob has no arrayBuffer(), which resizeLocal reads.
+      return Promise.resolve({ type: 'image/jpeg', arrayBuffer: () => Promise.resolve(new Uint8Array([0xff, 0xd8, 0xff]).buffer) });
     }
   };
   globalThis.createImageBitmap = vi.fn().mockResolvedValue({
@@ -51,7 +52,7 @@ beforeAll(() => {
     'resolveTab', 'ensureContentScript', 'toContent', 'resolveFrameId',
     'ensureDebugger', 'cdpSend', 'cdpClick', 'cdpType', 'cdpKey', 'cdpScroll', 'humanGapMs', 'DEFAULT_TYPE_WPM',
     'setInputFiles', 'interceptFileChooser',
-    'checkNative', 'resizeNative', 'resizeLocal', 'screenshot',
+    'checkNative', 'resizeNative', 'resizeLocal', 'dataUrlToBlob', 'screenshot',
     'executeJsMain', 'adaptScript', 'dispatch', 'explainError', 'getSessionId',
     'ensureApproved', 'takeClient', 'settleApproval', 'handleApprovalMessage', 'approvals',
     'PAGE_ACTIONS_THAT_GATE_ON_CURSOR',
@@ -1352,6 +1353,24 @@ describe('screenshot overlay clean mode', () => {
     expect(chrome.tabs.sendMessage.mock.invocationCallOrder[hideCall])
       .toBeLessThan(chrome.tabs.captureVisibleTab.mock.invocationCallOrder[0]);
     expect(result).toHaveProperty('base64');
+  });
+
+  it('resizes locally without fetching the data: URL (Firefox CSP blocks it)', async () => {
+    mockContentReachable();
+    chrome.tabs.get.mockResolvedValue({ id: 5, windowId: 12, url: 'https://x' });
+    // No native resizer, and any fetch of a data: URL fails the way Firefox does.
+    globalThis.fetch.mockImplementation((url) => String(url).startsWith('data:')
+      ? Promise.reject(new TypeError('NetworkError when attempting to fetch resource.'))
+      : Promise.reject(new TypeError('connection refused')));
+    globalThis.createImageBitmap.mockClear();
+
+    const result = await api.dispatch('screenshot', { tabId: 5 });
+
+    expect(globalThis.fetch.mock.calls.some(c => String(c[0]).startsWith('data:'))).toBe(false);
+    const blob = globalThis.createImageBitmap.mock.calls[0][0];
+    expect(blob.type).toBe('image/jpeg');
+    expect(blob.size).toBe(3); // 'AAAA' decodes to three bytes
+    expect(result).toMatchObject({ width: 1280, height: 800, mimeType: 'image/jpeg' });
   });
 
   it('restores the text chrome even when every capture path fails', async () => {
