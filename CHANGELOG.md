@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.18.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.17.0...v1.18.0) (2026-11-16)
+
+
+### Features
+
+* **self_update:** offer the checksum-verified release .xpi to Firefox and Zen installs that lag behind ([e5f8ba9](https://github.com/ikari-software/turboweb-mcp/commit/e5f8ba98c6a62426c8250a310ed86660359aed80))
+* **self_update:** offer the checksum-verified release .xpi to Firefox and Zen installs that lag behind ([3f82f85](https://github.com/ikari-software/turboweb-mcp/commit/3f82f8519fb5ed5e08e1abd9b5bb5c27c77cf011))
+* **self_update:** offer the checksum-verified release .xpi to Firefox and Zen installs that lag behind ([e20ac5a](https://github.com/ikari-software/turboweb-mcp/commit/e20ac5ab172c8f319309086ea771c87ae906bc19))
+
+
+### Bug Fixes
+
+* **ci:** mint Chrome Web Store token without the IAM Credentials API ([3f2966c](https://github.com/ikari-software/turboweb-mcp/commit/3f2966c4e0869524e568c1a98e16528400f94bad))
+* **ci:** mint Chrome Web Store token without the IAM Credentials API ([e8de8f7](https://github.com/ikari-software/turboweb-mcp/commit/e8de8f74eea312fb908faac3c336f02844e73227))
+* **self_update:** make the .xpi offer work from the CLI and tell agents what happened ([e5f8ba9](https://github.com/ikari-software/turboweb-mcp/commit/e5f8ba98c6a62426c8250a310ed86660359aed80))
+* **self_update:** make the .xpi offer work from the CLI and tell agents what happened ([3f82f85](https://github.com/ikari-software/turboweb-mcp/commit/3f82f8519fb5ed5e08e1abd9b5bb5c27c77cf011))
+* **self_update:** make the .xpi offer work from the CLI and tell agents what happened ([e20ac5a](https://github.com/ikari-software/turboweb-mcp/commit/e20ac5ab172c8f319309086ea771c87ae906bc19))
+
 ## [1.17.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.16.0...v1.17.0) (2026-11-16)
 
 
