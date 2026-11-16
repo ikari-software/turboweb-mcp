@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -83,6 +84,9 @@ type tabBrowser struct {
 	// approval answers approval_state; empty means the browser cannot (an old
 	// extension), which is signalled as an error.
 	approval string
+	// pageUA answers execute_js (the browser fingerprint probe); empty
+	// returns nothing, which leaves the name alone.
+	pageUA string
 }
 
 func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocket.Conn {
@@ -108,6 +112,10 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 				list[0]["groupTitle"] = "Research"
 			}
 			return map[string]any{"result": list}
+		case "execute_js":
+			if b.pageUA != "" {
+				return map[string]any{"result": map[string]any{"result": b.pageUA}}
+			}
 		case "open_tab":
 			return map[string]any{"result": map[string]any{"id": 77, "active": true, "index": 3}}
 		case "close_tabs":
@@ -510,6 +518,37 @@ func TestListTabs_PrefixesGroupIDs(t *testing.T) {
 			t.Errorf("list_tabs should carry prefixed group ids, got %s", raw)
 		}
 	})
+}
+
+// A Zen page has no window.zen, so the fingerprint refresh that
+// list_tabs runs sees stock Firefox. It must not rename a browser
+// whose extension already named itself in the hello, or self_update would
+// open Zen's .xpi in Firefox.
+func TestListTabs_PageFingerprintKeepsTheHellosName(t *testing.T) {
+	browsersMu.Lock()
+	browsers = make(map[*websocket.Conn]*BrowserConnection)
+	browsersMu.Unlock()
+	srv, wsURL := startTestWSServer(t)
+	defer srv.Close()
+
+	zen := &tabBrowser{tabs: []int{7}, pageUA: "Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/144.0"}
+	defer zen.connect(t, wsURL, "Zen/Mozilla/5.0 Firefox/144.0", "zen-profile").Close()
+	waitFor(t, func() bool {
+		open := getOpenBrowsers()
+		return len(open) == 1 && open[0].tabPrefix() != ""
+	})
+	if _, err := sendListTabs(getOpenBrowsers(), 5000, internalParams()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // let the async refresh goroutines finish
+	for _, bc := range getOpenBrowsers() {
+		bc.mu.Lock()
+		name := bc.name
+		bc.mu.Unlock()
+		if name != "Zen" {
+			t.Fatalf("name = %q after the page fingerprint refresh; want the hello's Zen", name)
+		}
+	}
 }
 
 func TestConnectionStatus_ListsEachBrowsersExtension(t *testing.T) {

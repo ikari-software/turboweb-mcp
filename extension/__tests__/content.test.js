@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import vm from 'vm';
@@ -736,6 +736,13 @@ describe('overlay setTextHidden', () => {
     expect(style.textContent).toContain(':host(.shot-clean) .toast');
     expect(style.textContent).toContain(':host(.shot-clean) .handoff-banner');
     expect(style.textContent).not.toContain(':host(.shot-clean) .cursor');
+  });
+
+  it('the clean-mode rule hides the viewport-wide flash and sweep, which wash out a capture', () => {
+    const host = globalThis.__overlayHost;
+    const style = host.shadowRoot.querySelector('style');
+    expect(style.textContent).toContain(':host(.shot-clean) .camera-flash');
+    expect(style.textContent).toContain(':host(.shot-clean) .read-sweep');
   });
 
   it('refcounts overlapping hides — one restore cannot expose text mid-capture', () => {
@@ -1591,6 +1598,41 @@ describe('screenshot_diff_meta', () => {
     const arg = sendResponse.mock.calls[0][0];
     expect(arg).toHaveProperty('masks');
     expect(arg).toHaveProperty('dom');
+  });
+});
+
+// ============================================================
+// camera flash — after the capture, never during it
+// ============================================================
+describe('screenshot camera flash', () => {
+  const flashes = () => globalThis.__overlayHost.shadowRoot.querySelectorAll('.camera-flash').length;
+
+  afterEach(() => {
+    globalThis.__overlayHost?.shadowRoot.querySelectorAll('.camera-flash').forEach(n => n.remove());
+  });
+
+  it.each(['screenshot', 'turbo_snapshot', 'capture_page'])(
+    '%s: no flash when it starts, one once it has been taken', async (action) => {
+      await api.overlay.showStart({ action, intent: 'capturing', id: 'f1' });
+      expect(flashes()).toBe(0);
+      await api.overlay.showResult({ action, result: { width: 1, height: 1 }, id: 'f1' });
+      expect(flashes()).toBe(1);
+    });
+
+  it('does not start a flash while another capture is in progress', async () => {
+    api.overlay.setTextHidden(true);
+    try {
+      await api.overlay.showResult({ action: 'screenshot', result: { width: 1, height: 1 }, id: 'f3' });
+      expect(flashes()).toBe(0);
+    } finally {
+      api.overlay.setTextHidden(false);
+    }
+  });
+
+  it('does not flash for tools without the camera visual', async () => {
+    const before = flashes();
+    await api.overlay.showResult({ action: 'get_html', result: {}, id: 'f2' });
+    expect(flashes()).toBe(before);
   });
 });
 

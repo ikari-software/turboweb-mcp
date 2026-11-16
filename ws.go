@@ -39,9 +39,13 @@ type BrowserConnection struct {
 	// "normal" (store or .xpi install), "development" (unpacked/temporary)...
 	extVersion  string
 	installType string
-	seq         int          // connection number, the tab-ref key for extensions without an instance ID
-	tabIDs      map[int]bool // tabID -> isActive (true when that tab is the focused one)
-	mu          sync.Mutex   // protects conn writes
+	// namedByHello: the extension named its browser itself. The page
+	// fingerprint refresh in sendListTabs must not override it: in a
+	// Zen page window.zen is absent, so the page reports stock Firefox.
+	namedByHello bool
+	seq          int          // connection number, the tab-ref key for extensions without an instance ID
+	tabIDs       map[int]bool // tabID -> isActive (true when that tab is the focused one)
+	mu           sync.Mutex   // protects conn writes
 }
 
 type pendingRequest struct {
@@ -611,6 +615,7 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 			bc.instance = hello.Instance
 			bc.extVersion = hello.Version
 			bc.installType = hello.InstallType
+			bc.namedByHello = true
 			switch {
 			case contains(hello.UA, "Zen"):
 				bc.name = "Zen"
@@ -1086,9 +1091,11 @@ func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any)
 	for _, bc := range open {
 		go func(bc *BrowserConnection) {
 			bc.mu.Lock()
-			alreadyNamed := bc.name != "" && bc.name != "Chrome" // "Chrome" is the default fallback
-			_ = alreadyNamed
+			named := bc.namedByHello
 			bc.mu.Unlock()
+			if named {
+				return // the hello's name is authoritative (a Zen page looks like Firefox)
+			}
 			raw, err := sendTo(bc, "execute_js", internalParams("code", jsBrowserFingerprint), 3000)
 			if err != nil {
 				return
