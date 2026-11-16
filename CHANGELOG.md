@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.18.2](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.1...v1.18.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* **review:** keep the hello's Zen name through list_tabs; harden the hello and flash ([7f24d5e](https://github.com/ikari-software/turboweb-mcp/commit/7f24d5eae471a2d887b454032453403b6165643c))
+* **screenshot:** flash after the capture, not during, so screenshots keep their contrast ([333f4ab](https://github.com/ikari-software/turboweb-mcp/commit/333f4abe30af8e960d3328e14d0567e697ef787c))
+* screenshots keep their contrast; Zen is named Zen ([03e3e78](https://github.com/ikari-software/turboweb-mcp/commit/03e3e78fc3b0c45a6df8cd8c3b9fe5f9ef01bc6e))
+* **zen:** identify Zen from runtime.getBrowserInfo in the hello ([89a91d7](https://github.com/ikari-software/turboweb-mcp/commit/89a91d750218794226bbb2e1c9a769662ca2e429))
+
 ## [1.18.1](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.0...v1.18.1) (2026-11-16)
 
 
