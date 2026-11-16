@@ -1603,19 +1603,35 @@ describe('agent approval', () => {
     }
   });
 
-  it('hello — names Zen from runtime.getBrowserInfo, since its UA says Firefox', async () => {
-    chrome.runtime.getBrowserInfo = vi.fn().mockResolvedValue({ name: 'Zen', vendor: 'Mozilla' });
+  // Sends a hello with the given getBrowserInfo stub and returns its ua.
+  async function helloUA(getBrowserInfo) {
+    if (getBrowserInfo) chrome.runtime.getBrowserInfo = getBrowserInfo;
     try {
       const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
       if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }
       api.connect();
       const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
       ws._open();
-      await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
-      expect(JSON.parse(ws.send.mock.calls[0][0]).ua).toMatch(/^Zen\//);
+      await vi.waitFor(() => expect(ws.send).toHaveBeenCalled(), { timeout: 3000 });
+      return JSON.parse(ws.send.mock.calls[0][0]).ua;
     } finally {
       delete chrome.runtime.getBrowserInfo;
     }
+  }
+
+  it('hello — names Zen from runtime.getBrowserInfo, since its UA says Firefox', async () => {
+    const ua = await helloUA(vi.fn().mockResolvedValue({ name: 'Zen', vendor: 'Mozilla' }));
+    expect(ua).toBe('Zen/' + navigator.userAgent);
+  });
+
+  it('hello — leaves the UA alone for Firefox, Chrome (no getBrowserInfo) and a failed lookup', async () => {
+    expect(await helloUA(vi.fn().mockResolvedValue({ name: 'Firefox' }))).toBe(navigator.userAgent);
+    expect(await helloUA(undefined)).toBe(navigator.userAgent);
+    expect(await helloUA(vi.fn().mockRejectedValue(new Error('nope')))).toBe(navigator.userAgent);
+  });
+
+  it('hello — still goes out when getBrowserInfo never answers', async () => {
+    expect(await helloUA(vi.fn(() => new Promise(() => {})))).toBe(navigator.userAgent);
   });
 
   it('holds a command at the socket until the agent is approved', async () => {

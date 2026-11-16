@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import vm from 'vm';
@@ -1607,11 +1607,26 @@ describe('screenshot_diff_meta', () => {
 describe('screenshot camera flash', () => {
   const flashes = () => globalThis.__overlayHost.shadowRoot.querySelectorAll('.camera-flash').length;
 
-  it('does not flash when the screenshot starts, only once it has been taken', async () => {
-    await api.overlay.showStart({ action: 'screenshot', intent: 'capturing', id: 'f1' });
-    expect(flashes()).toBe(0);
-    await api.overlay.showResult({ action: 'screenshot', result: { width: 1, height: 1 }, id: 'f1' });
-    expect(flashes()).toBe(1);
+  afterEach(() => {
+    globalThis.__overlayHost?.shadowRoot.querySelectorAll('.camera-flash').forEach(n => n.remove());
+  });
+
+  it.each(['screenshot', 'turbo_snapshot', 'capture_page'])(
+    '%s: no flash when it starts, one once it has been taken', async (action) => {
+      await api.overlay.showStart({ action, intent: 'capturing', id: 'f1' });
+      expect(flashes()).toBe(0);
+      await api.overlay.showResult({ action, result: { width: 1, height: 1 }, id: 'f1' });
+      expect(flashes()).toBe(1);
+    });
+
+  it('does not start a flash while another capture is in progress', async () => {
+    api.overlay.setTextHidden(true);
+    try {
+      await api.overlay.showResult({ action: 'screenshot', result: { width: 1, height: 1 }, id: 'f3' });
+      expect(flashes()).toBe(0);
+    } finally {
+      api.overlay.setTextHidden(false);
+    }
   });
 
   it('does not flash for tools without the camera visual', async () => {

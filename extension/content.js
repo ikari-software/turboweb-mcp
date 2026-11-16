@@ -2603,6 +2603,10 @@
     function cameraFlash() {
       ensure();
       if (!root) return;
+      // Another capture is in progress: the clean-mode CSS would hide this
+      // flash, and display:none restarts its animation, so it would replay
+      // once that capture ends. Skip it.
+      if (cleanHides > 0) return;
       const f = document.createElement('div');
       f.className = 'camera-flash';
       root.appendChild(f);
@@ -2887,7 +2891,9 @@
     // Read-only / state-only ops that don't have a specific cursor
     // animation in resolveTarget. Each value picks which visual the
     // overlay fires for that action:
-    //   - 'flash'  → viewport-wide camera flash (screenshot-ish)
+    //   - 'flash'  → viewport-wide camera flash (screenshot-ish), fired from
+    //                showResult once the capture is done, never at start
+    //                (it would wash out the image)
     //   - 'sweep'  → top-to-bottom scanline ("agent reading the page")
     //   - 'pulse'  → small corner ring ("agent reading browser state")
     const READ_ONLY_VISUALS = new Map([
