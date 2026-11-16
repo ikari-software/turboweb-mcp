@@ -738,6 +738,13 @@ describe('overlay setTextHidden', () => {
     expect(style.textContent).not.toContain(':host(.shot-clean) .cursor');
   });
 
+  it('the clean-mode rule hides the viewport-wide flash and sweep, which wash out a capture', () => {
+    const host = globalThis.__overlayHost;
+    const style = host.shadowRoot.querySelector('style');
+    expect(style.textContent).toContain(':host(.shot-clean) .camera-flash');
+    expect(style.textContent).toContain(':host(.shot-clean) .read-sweep');
+  });
+
   it('refcounts overlapping hides — one restore cannot expose text mid-capture', () => {
     const host = globalThis.__overlayHost;
     api.overlay.setTextHidden(true);   // capture A hides
@@ -1591,6 +1598,26 @@ describe('screenshot_diff_meta', () => {
     const arg = sendResponse.mock.calls[0][0];
     expect(arg).toHaveProperty('masks');
     expect(arg).toHaveProperty('dom');
+  });
+});
+
+// ============================================================
+// camera flash — after the capture, never during it
+// ============================================================
+describe('screenshot camera flash', () => {
+  const flashes = () => globalThis.__overlayHost.shadowRoot.querySelectorAll('.camera-flash').length;
+
+  it('does not flash when the screenshot starts, only once it has been taken', async () => {
+    await api.overlay.showStart({ action: 'screenshot', intent: 'capturing', id: 'f1' });
+    expect(flashes()).toBe(0);
+    await api.overlay.showResult({ action: 'screenshot', result: { width: 1, height: 1 }, id: 'f1' });
+    expect(flashes()).toBe(1);
+  });
+
+  it('does not flash for tools without the camera visual', async () => {
+    const before = flashes();
+    await api.overlay.showResult({ action: 'get_html', result: {}, id: 'f2' });
+    expect(flashes()).toBe(before);
   });
 });
 

@@ -1845,10 +1845,15 @@
         /* Screenshot-clean mode: the screenshot tool hides the overlay's
            text-bearing chrome (badge, toasts, handoff banner) so the
            capture shows the page, not the agent's narration. Text-free
-           effects — cursor, ripples, highlights — stay visible. */
+           effects — cursor, ripples, highlights — stay visible. The
+           viewport-wide effects go too: the screenshot's own camera
+           flash (a 40% white wash) is still fading when the capture
+           lands and would lift every black in it to ~42/255. */
         :host(.shot-clean) .badge,
         :host(.shot-clean) .toast,
-        :host(.shot-clean) .handoff-banner { display: none !important; }
+        :host(.shot-clean) .handoff-banner,
+        :host(.shot-clean) .camera-flash,
+        :host(.shot-clean) .read-sweep { display: none !important; }
         .cursor {
           position: fixed; top: 0; left: 0;
           width: 24px; height: 24px;
@@ -2963,7 +2968,8 @@
           // result-time visualisation (scan-flash, loupe sweep) is
           // additive — turbo_snapshot for instance does both.
           switch (READ_ONLY_VISUALS.get(action)) {
-            case 'flash': cameraFlash(); break;
+            // 'flash' fires from showResult instead: a flash before the
+            // capture lands in the image as a white wash.
             case 'sweep': readSweep();   break;
             case 'pulse': dataPulse();   break;
           }
@@ -2988,6 +2994,8 @@
       markToastEnded();
       try {
         markTaskEnd(id);
+        // The camera flash marks "captured": after the shot, never during.
+        if (READ_ONLY_VISUALS.get(action) === 'flash') cameraFlash();
         if (!result) return;
         if (action === 'find_text' && Array.isArray(result.results)) {
           // Cap so a 50-match find doesn't take 10 seconds to play out.
