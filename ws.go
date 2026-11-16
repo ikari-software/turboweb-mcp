@@ -952,7 +952,7 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	switch action {
 	case "open_tab":
 		return sendOpenTab(open, params, timeout)
-	case "move_tabs", "close_tabs":
+	case "move_tabs", "close_tabs", "group_tabs", "ungroup_tabs":
 		return sendTabSet(open, action, params, timeout)
 	}
 
@@ -1021,6 +1021,7 @@ func sendListTabs(open []*BrowserConnection, timeout int, params map[string]any)
 					active, _ := tab["active"].(bool)
 					owned[id] = active
 					tab["id"] = prefix + ":" + strconv.Itoa(id)
+					bc.prefixGroupID(tab)
 					tab["browser"] = name
 					b, _ := json.Marshal(tab)
 					out = append(out, b)

@@ -123,6 +123,8 @@ function summariseResult(action, result) {
     if (action === 'wake_tab') return result.interactive ? 'awake' : (result.reason || 'not interactive');
     if (action === 'close_tabs') return `closed ${result.closed?.length ?? 0}`;
     if (action === 'move_tabs') return `moved ${result.tabs?.length ?? 0}`;
+    if (action === 'group_tabs') return `${result.group?.title || 'group'}: ${result.tabs?.length ?? 0} tabs`;
+    if (action === 'ungroup_tabs') return `ungrouped ${result.tabs?.length ?? 0}`;
   } catch {}
   return '';
 }
@@ -869,6 +871,90 @@ async function moveTabs(params) {
     }
   }
   return { tabs, skipped };
+}
+
+// Tab groups: Chrome 89+ and Firefox 139+ (the tabGroups namespace also needs
+// the "tabGroups" permission). Older Firefox builds, and forks that switch
+// groups off, lack the API, so it is detected per call.
+const TAB_GROUP_COLORS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+
+function requireTabGroups(needUpdate) {
+  if (!chrome.tabs.group || !chrome.tabs.ungroup || (needUpdate && !chrome.tabGroups?.update)) {
+    throw new Error('this browser does not offer tab groups to extensions (they need Chrome 89+ or Firefox 139+ ' +
+      'with tab groups switched on). move_tabs can still put related tabs side by side.');
+  }
+}
+
+function groupInfo(g) {
+  return { id: g.id, title: g.title || '', color: g.color, collapsed: !!g.collapsed, windowId: g.windowId };
+}
+
+// groupTabs puts tabs into a group, new or existing (params.groupId), and sets
+// the group's title, color and collapsed state. With only groupId it just
+// updates the group. Pinned tabs cannot be grouped and are reported as skipped.
+async function groupTabs(params) {
+  const props = {};
+  if (params.title != null) props.title = String(params.title);
+  if (params.color != null) {
+    if (!TAB_GROUP_COLORS.includes(params.color)) {
+      throw new Error(`color must be one of ${TAB_GROUP_COLORS.join(', ')}`);
+    }
+    props.color = params.color;
+  }
+  if (params.collapsed != null) props.collapsed = !!params.collapsed;
+  requireTabGroups(Object.keys(props).length > 0 || params.groupId == null);
+
+  const ids = [];
+  const skipped = [];
+  for (const id of params.tabIds || []) {
+    let tab;
+    try { tab = await chrome.tabs.get(id); } catch { skipped.push({ id, reason: 'not found' }); continue; }
+    if (tab.pinned) { skipped.push({ id, reason: 'pinned tabs cannot be grouped' }); continue; }
+    ids.push(id);
+  }
+
+  let groupId = params.groupId ?? null;
+  if (ids.length) {
+    const opts = { tabIds: ids };
+    if (groupId != null) opts.groupId = groupId;
+    else if (params.windowId != null) opts.createProperties = { windowId: params.windowId };
+    groupId = await chrome.tabs.group(opts);
+  } else if (groupId == null) {
+    throw new Error('no tab could be grouped: ' + (skipped.map(s => `${s.id} (${s.reason})`).join(', ') || 'tabIds is empty'));
+  }
+  if (Object.keys(props).length) await chrome.tabGroups.update(groupId, props);
+
+  const group = chrome.tabGroups?.get ? groupInfo(await chrome.tabGroups.get(groupId)) : { id: groupId };
+  const tabs = (await chrome.tabs.query({ groupId })).map(tabInfo);
+  return { group, tabs, skipped };
+}
+
+// ungroupTabs takes tabs out of whatever group they are in; a group left
+// empty disappears.
+async function ungroupTabs(params) {
+  requireTabGroups(false);
+  const ids = [];
+  const skipped = [];
+  for (const id of params.tabIds || []) {
+    try { await chrome.tabs.get(id); ids.push(id); } catch { skipped.push({ id, reason: 'not found' }); }
+  }
+  if (ids.length) await chrome.tabs.ungroup(ids);
+  const tabs = [];
+  for (const id of ids) {
+    try { tabs.push(tabInfo(await chrome.tabs.get(id))); } catch { skipped.push({ id, reason: 'closed while ungrouping' }); }
+  }
+  return { tabs, skipped };
+}
+
+// tabGroupsById reads every group's title and color for list_tabs; empty when
+// the browser has no groups API.
+async function tabGroupsById() {
+  const byId = new Map();
+  if (!chrome.tabGroups?.query) return byId;
+  try {
+    for (const g of await chrome.tabGroups.query({})) byId.set(g.id, g);
+  } catch {}
+  return byId;
 }
 
 // wakeTab makes a background tab usable without bringing it forward. Browsers
@@ -1812,11 +1898,13 @@ async function dispatch(action, params) {
   switch (action) {
     // --- Background-handled commands ---
     case 'list_tabs': {
-      const tabs = await chrome.tabs.query({});
-      return tabs.map(t => ({
-        ...tabInfo(t),
-        status: t.status, favIconUrl: t.favIconUrl,
-      }));
+      const [tabs, groups] = await Promise.all([chrome.tabs.query({}), tabGroupsById()]);
+      return tabs.map(t => {
+        const info = { ...tabInfo(t), status: t.status, favIconUrl: t.favIconUrl };
+        const g = groups.get(t.groupId);
+        if (g) { info.groupTitle = g.title || ''; info.groupColor = g.color; }
+        return info;
+      });
     }
 
     case 'open_tab': {
@@ -1857,6 +1945,12 @@ async function dispatch(action, params) {
 
     case 'move_tabs':
       return await moveTabs(params);
+
+    case 'group_tabs':
+      return await groupTabs(params);
+
+    case 'ungroup_tabs':
+      return await ungroupTabs(params);
 
     case 'wake_tab':
       return await wakeTab(params.tabId, params.timeoutMs);
