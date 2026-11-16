@@ -1569,6 +1569,21 @@ describe('agent approval', () => {
     expect(api.takeClient({ _client: { id: 5 } }, '')).toMatchObject({ id: 'legacy', name: 'Unknown agent' });
   });
 
+  it('hello — reports the extension version and how it was installed', async () => {
+    chrome.management = { getSelf: vi.fn().mockResolvedValue({ installType: 'normal' }) };
+    try {
+      const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+      if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }
+      api.connect();
+      const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+      ws._open();
+      await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+      expect(JSON.parse(ws.send.mock.calls[0][0])).toMatchObject({ type: 'hello', version: '0.0.0-test', installType: 'normal' });
+    } finally {
+      delete chrome.management;
+    }
+  });
+
   it('holds a command at the socket until the agent is approved', async () => {
     const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
     if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }

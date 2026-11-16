@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -138,7 +139,8 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 		}
 		return map[string]any{"result": nil}
 	})
-	hello, _ := json.Marshal(map[string]any{"type": "hello", "ua": ua, "instance": instance})
+	hello, _ := json.Marshal(map[string]any{"type": "hello", "ua": ua, "instance": instance,
+		"version": "1.0.0", "installType": "normal"})
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
 		t.Fatalf("hello: %v", err)
 	}
@@ -506,6 +508,37 @@ func TestListTabs_PrefixesGroupIDs(t *testing.T) {
 		}
 		if !strings.Contains(string(raw), `"groupId":"`+zenPrefix+`:5"`) {
 			t.Errorf("list_tabs should carry prefixed group ids, got %s", raw)
+		}
+	})
+}
+
+func TestConnectionStatus_ListsEachBrowsersExtension(t *testing.T) {
+	withZenAndFirefox(t, func(_, _ *tabBrowser, _, _ string) {
+		var st struct {
+			Extensions []extensionInfo `json:"extensions"`
+		}
+		if err := json.Unmarshal(connectionStatusJSON(), &st); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range st.Extensions {
+			names = append(names, e.Browser)
+		}
+		slices.Sort(names)
+		if fmt.Sprint(names) != "[Firefox Zen]" {
+			t.Errorf("extensions = %+v; want one entry per connected browser", st.Extensions)
+		}
+		for _, e := range st.Extensions {
+			if e.Version != "1.0.0" || e.InstallType != "normal" {
+				t.Errorf("%s: version/installType from the hello not carried through: %+v", e.Browser, e)
+			}
+		}
+		// The same list is what the --self-update CLI reads from /extensions.
+		rec := httptest.NewRecorder()
+		handleExtensions(rec, httptest.NewRequest("GET", "/extensions", nil))
+		var viaHTTP []extensionInfo
+		if err := json.Unmarshal(rec.Body.Bytes(), &viaHTTP); err != nil || len(viaHTTP) != 2 {
+			t.Errorf("/extensions = %s (%v)", rec.Body.String(), err)
 		}
 	})
 }
