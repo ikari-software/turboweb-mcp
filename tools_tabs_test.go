@@ -30,7 +30,7 @@ func TestRegisteredTools_TabIDIsRequired(t *testing.T) {
 	if withTab == 0 {
 		t.Fatal("no registered tool declares tabId")
 	}
-	for _, name := range []string{"open_tab", "close_tabs", "move_tabs", "wake_tab"} {
+	for _, name := range []string{"open_tab", "close_tabs", "move_tabs", "group_tabs", "ungroup_tabs", "wake_tab"} {
 		if s.GetTool(name) == nil {
 			t.Errorf("%s is not registered", name)
 		}
@@ -102,6 +102,10 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 			for i, id := range b.tabs {
 				list[i] = map[string]any{"id": id, "title": instance}
 			}
+			if len(list) > 0 {
+				list[0]["groupId"] = 5
+				list[0]["groupTitle"] = "Research"
+			}
 			return map[string]any{"result": list}
 		case "open_tab":
 			return map[string]any{"result": map[string]any{"id": 77, "active": true, "index": 3}}
@@ -122,6 +126,11 @@ func (b *tabBrowser) connect(t *testing.T, wsURL, ua, instance string) *websocke
 			return map[string]any{"result": map[string]any{"state": b.approval, "decided": true}}
 		case "wake_tab":
 			return map[string]any{"result": map[string]any{"id": params["tabId"], "loaded": true, "interactive": true}}
+		case "group_tabs":
+			return map[string]any{"result": map[string]any{
+				"group": map[string]any{"id": 5, "title": params["title"]},
+				"tabs":  []map[string]any{{"id": 7, "groupId": 5}, {"id": 8, "groupId": 5}},
+			}}
 		case "move_tabs":
 			return map[string]any{"result": map[string]any{
 				"tabs": []map[string]any{{"id": 8, "index": 0}, {"id": 7, "index": 1}},
@@ -418,4 +427,85 @@ func TestBidiTabList_ListsTopLevelContextsWithUsableIDs(t *testing.T) {
 			t.Errorf("tab %v does not resolve to its own context (got %q)", tab, ctx)
 		}
 	}
+}
+
+func TestGroupTabs_RoutesAndPrefixesGroupAndTabIDs(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, _ string) {
+		res, err := handleGroupTabs(context.Background(), reqWith(map[string]any{
+			"tabIds": []any{zenPrefix + ":7", zenPrefix + ":8"},
+			"title":  "Research",
+			"color":  "blue",
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ff.params("group_tabs") != nil {
+			t.Error("group_tabs for Zen tabs reached Firefox")
+		}
+		got := zen.params("group_tabs")
+		if fmt.Sprint(got["tabIds"]) != "[7 8]" || got["title"] != "Research" || got["groupId"] != nil {
+			t.Errorf("Zen received %v; want tabIds [7 8], the title, and no groupId", got)
+		}
+		text := extractText(t, res)
+		for _, want := range []string{`"id":"` + zenPrefix + `:5"`, `"groupId":"` + zenPrefix + `:5"`, `"id":"` + zenPrefix + `:8"`} {
+			if !strings.Contains(text, want) {
+				t.Errorf("result should contain %s, got %s", want, text)
+			}
+		}
+	})
+}
+
+func TestGroupTabs_GroupIDAlone(t *testing.T) {
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, _ string) {
+		res, _ := handleGroupTabs(context.Background(), reqWith(map[string]any{"groupId": float64(5), "title": "x"}))
+		if !res.IsError || !strings.Contains(extractText(t, res), "ambiguous") {
+			t.Errorf("a bare groupId with two browsers should be refused, got %q", extractText(t, res))
+		}
+		res, _ = handleGroupTabs(context.Background(), reqWith(map[string]any{"groupId": zenPrefix + ":5", "collapsed": true}))
+		if res.IsError {
+			t.Fatalf("prefixed groupId: %s", extractText(t, res))
+		}
+		if got := zen.params("group_tabs"); toInt(got["groupId"]) != 5 || fmt.Sprint(got["tabIds"]) != "[]" {
+			t.Errorf("Zen received %v; want groupId 5 and no tabs", got)
+		}
+		if ff.params("group_tabs") != nil {
+			t.Error("Firefox should not be asked")
+		}
+	})
+}
+
+func TestGroupTabs_BareGroupFollowsTheTabs(t *testing.T) {
+	withZenAndFirefox(t, func(zen, _ *tabBrowser, zenPrefix, ffPrefix string) {
+		res, _ := handleGroupTabs(context.Background(), reqWith(map[string]any{
+			"tabIds": []any{zenPrefix + ":8"}, "groupId": float64(5),
+		}))
+		if res.IsError || toInt(zen.params("group_tabs")["groupId"]) != 5 {
+			t.Errorf("bare groupId should go to the tabs' browser: %s", extractText(t, res))
+		}
+		res, _ = handleGroupTabs(context.Background(), reqWith(map[string]any{
+			"tabIds": []any{zenPrefix + ":8"}, "groupId": ffPrefix + ":5",
+		}))
+		if !res.IsError || !strings.Contains(extractText(t, res), "another browser") {
+			t.Errorf("a group of another browser should be refused, got %q", extractText(t, res))
+		}
+	})
+}
+
+func TestGroupTabs_NeedsTabsOrGroup(t *testing.T) {
+	res, _ := handleGroupTabs(context.Background(), reqWith(map[string]any{"title": "x"}))
+	if !res.IsError || !strings.Contains(extractText(t, res), "groupId") {
+		t.Errorf("want a usage error, got %q", extractText(t, res))
+	}
+}
+
+func TestListTabs_PrefixesGroupIDs(t *testing.T) {
+	withZenAndFirefox(t, func(_, _ *tabBrowser, zenPrefix, _ string) {
+		raw, err := sendListTabs(getOpenBrowsers(), 5000, internalParams())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `"groupId":"`+zenPrefix+`:5"`) {
+			t.Errorf("list_tabs should carry prefixed group ids, got %s", raw)
+		}
+	})
 }

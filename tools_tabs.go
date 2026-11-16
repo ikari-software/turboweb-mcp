@@ -79,6 +79,43 @@ func registerTabTools(s *server.MCPServer) {
 		handleMoveTabs,
 	)
 
+	// --- group_tabs ---
+	addTool(s,
+		mcp.NewTool("group_tabs",
+			mcp.WithDescription("Put tabs into a named, colored tab group, or rename/recolor/collapse one. "+
+				"Without groupId the tabs form a new group; with groupId they join that group. "+
+				"Pass only groupId plus title/color/collapsed to change a group without moving tabs. "+
+				"The browser moves grouped tabs next to each other. Returns the group, with the `id` to pass "+
+				"as groupId later, and its tabs. Pinned tabs cannot be grouped and are reported under `skipped`. "+
+				"list_tabs shows each tab's groupId, groupTitle and groupColor. "+
+				"Needs Chrome 89+ or Firefox 139+; all tabs in one call must belong to the same browser."),
+			mcp.WithArray("tabIds",
+				mcp.Description("Tab IDs from list_tabs to put in the group (optional when groupId is given)"),
+				mcp.Items(map[string]any{"type": []string{"string", "number"}}),
+			),
+			mcp.WithAny("groupId",
+				mcp.Description("An existing group (groupId from list_tabs or an earlier group_tabs) to add to or change"),
+				func(schema map[string]any) { schema["type"] = []string{"string", "number"} },
+			),
+			mcp.WithString("title", mcp.Description("Group name shown on the tab strip")),
+			mcp.WithString("color", mcp.Description("Group color"),
+				mcp.Enum("grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange")),
+			mcp.WithBoolean("collapsed", mcp.Description("Collapse (true) or expand (false) the group")),
+			mcp.WithNumber("windowId", mcp.Description("For a new group: the window to create it in (windowId from list_tabs)")),
+		),
+		handleGroupTabs,
+	)
+
+	// --- ungroup_tabs ---
+	addTool(s,
+		mcp.NewTool("ungroup_tabs",
+			mcp.WithDescription("Take tabs out of their tab groups; a group left empty disappears. "+
+				"All tabs in one call must belong to the same browser."),
+			tabRefsParam("tabIds", "Tab IDs from list_tabs to ungroup"),
+		),
+		handleUngroupTabs,
+	)
+
 	// --- wake_tab ---
 	addTool(s,
 		mcp.NewTool("wake_tab",
@@ -136,6 +173,23 @@ func handleMoveTabs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolRe
 		return mcp.NewToolResultError("Pass either after or before, not both"), nil
 	}
 	return sendTabList("move_tabs", req, moveTabsTimeoutMs)
+}
+
+func handleGroupTabs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	ids, _ := args["tabIds"].([]any)
+	if len(ids) == 0 && args["groupId"] == nil {
+		return mcp.NewToolResultError("Pass tabIds to group (a new group, or groupId's group), or groupId to change an existing group"), nil
+	}
+	raw, err := send("group_tabs", rawArgs(args), 30000)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(string(raw)), nil
+}
+
+func handleUngroupTabs(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return sendTabList("ungroup_tabs", req, 30000)
 }
 
 func sendTabList(action string, req mcp.CallToolRequest, timeoutMs int) (*mcp.CallToolResult, error) {
@@ -222,8 +276,14 @@ func (bc *BrowserConnection) prefixTabIDs(raw json.RawMessage) json.RawMessage {
 		if id, ok := m["id"].(float64); ok {
 			m["id"] = bc.tabRef(int(id))
 		}
+		bc.prefixGroupID(m)
 	}
 	fix(reply)
+	if g, ok := reply["group"].(map[string]any); ok {
+		if id, ok := g["id"].(float64); ok {
+			g["id"] = bc.tabRef(int(id))
+		}
+	}
 	for _, k := range []string{"tabs", "closed", "skipped"} {
 		list, _ := reply[k].([]any)
 		for _, item := range list {
@@ -235,6 +295,41 @@ func (bc *BrowserConnection) prefixTabIDs(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 	return out
+}
+
+// prefixGroupID rewrites a tab's groupId into a browser-qualified ref, shaped
+// like a tab ref ("zen-3f9a1c2b:5"): group numbers, too, are per browser.
+func (bc *BrowserConnection) prefixGroupID(tab map[string]any) {
+	if id, ok := tab["groupId"].(float64); ok {
+		tab["groupId"] = bc.tabRef(int(id))
+	}
+}
+
+// browserForGroup finds the browser a groupId ref belongs to. A bare number is
+// taken to be in the browser the call's tabs are in, or the only one connected.
+func browserForGroup(open []*BrowserConnection, v any, tabsIn *BrowserConnection) (*BrowserConnection, int, error) {
+	key, id, ok := parseTabRef(v)
+	if !ok {
+		return nil, 0, fmt.Errorf("Invalid groupId %v: use a groupId from list_tabs or group_tabs, e.g. \"zen-3f9a1c2b:5\"", v)
+	}
+	if key == "" {
+		switch {
+		case tabsIn != nil:
+			return tabsIn, id, nil
+		case len(open) == 1:
+			return open[0], id, nil
+		}
+		return nil, 0, fmt.Errorf("groupId %v is ambiguous across %d connected browsers: pass the full id from list_tabs", v, len(open))
+	}
+	for _, bc := range open {
+		if bc.instanceKey() == key {
+			if tabsIn != nil && bc != tabsIn {
+				return nil, 0, fmt.Errorf("group %v is in another browser than the tabs (%s)", v, tabsIn.tabPrefix())
+			}
+			return bc, id, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("Group %v: that browser is not connected; run list_tabs for current ids", v)
 }
 
 func sendOpenTab(open []*BrowserConnection, params map[string]any, timeout int) (json.RawMessage, error) {
@@ -266,8 +361,8 @@ func sendOpenTab(open []*BrowserConnection, params map[string]any, timeout int) 
 	return bc.prefixTabIDs(raw), nil
 }
 
-// sendTabSet routes move_tabs / close_tabs. Every tab they name, anchors
-// included, has to live in one browser: a tab cannot move between browsers.
+// sendTabSet routes move_tabs, close_tabs, group_tabs and ungroup_tabs. Every
+// tab (and group) they name, anchors included, has to live in one browser: a tab cannot move between browsers.
 func sendTabSet(open []*BrowserConnection, action string, params map[string]any, timeout int) (json.RawMessage, error) {
 	var target *BrowserConnection
 	resolve := func(v any) (int, error) {
@@ -284,7 +379,7 @@ func sendTabSet(open []*BrowserConnection, action string, params map[string]any,
 	}
 
 	refs, _ := params["tabIds"].([]any)
-	if len(refs) == 0 {
+	if len(refs) == 0 && (action != "group_tabs" || params["groupId"] == nil) {
 		return nil, fmt.Errorf("tabIds is required: a non-empty list of tab IDs from list_tabs")
 	}
 	ids := make([]int, len(refs))
@@ -306,6 +401,16 @@ func sendTabSet(open []*BrowserConnection, action string, params map[string]any,
 			return nil, err
 		}
 		params[k] = id
+	}
+
+	if g := params["groupId"]; g != nil {
+		bc, id, err := browserForGroup(open, g, target)
+		if err != nil {
+			return nil, err
+		}
+		target, params["groupId"] = bc, id
+	} else {
+		delete(params, "groupId")
 	}
 
 	raw, err := sendTo(target, action, params, timeout)

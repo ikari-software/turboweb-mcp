@@ -794,6 +794,89 @@ describe('dispatch', () => {
     return (windowId = 1) => wins[windowId];
   }
 
+  // A tiny tab-group model: tabs.group/ungroup/query and tabGroups.* share it.
+  function mockGroups(tabs) {
+    const groupOf = new Map(tabs.map(t => [t.id, -1]));
+    const groups = new Map();
+    let next = 50;
+    chrome.tabs.get.mockReset().mockImplementation(async (id) => {
+      const t = tabs.find(x => x.id === id);
+      if (!t) throw new Error(`No tab with id: ${id}`);
+      return { ...t, windowId: 1, index: tabs.indexOf(t), groupId: groupOf.get(id) };
+    });
+    chrome.tabs.query.mockReset().mockImplementation(async (q) =>
+      Promise.all(tabs.filter(t => q.groupId == null || groupOf.get(t.id) === q.groupId).map(t => chrome.tabs.get(t.id))));
+    chrome.tabs.group = vi.fn(async ({ tabIds, groupId }) => {
+      const gid = groupId ?? next++;
+      if (!groups.has(gid)) groups.set(gid, { id: gid, title: '', color: 'grey', collapsed: false, windowId: 1 });
+      for (const id of tabIds) groupOf.set(id, gid);
+      return gid;
+    });
+    chrome.tabs.ungroup = vi.fn(async (ids) => { for (const id of ids) groupOf.set(id, -1); });
+    chrome.tabGroups = {
+      get: vi.fn(async (id) => ({ ...groups.get(id) })),
+      update: vi.fn(async (id, props) => Object.assign(groups.get(id), props)),
+      query: vi.fn(async () => [...groups.values()]),
+    };
+    return { groupOf };
+  }
+
+  afterEach(() => {
+    delete chrome.tabs.group;
+    delete chrome.tabs.ungroup;
+    delete chrome.tabGroups;
+  });
+
+  it('group_tabs — creates a titled, colored group and skips pinned tabs', async () => {
+    mockGroups([{ id: 1 }, { id: 2 }, { id: 3, pinned: true }]);
+    const result = await api.dispatch('group_tabs', { tabIds: [1, 2, 3, 9], title: 'Research', color: 'blue' });
+    expect(result.group).toMatchObject({ id: 50, title: 'Research', color: 'blue' });
+    expect(result.tabs.map(t => t.id)).toEqual([1, 2]);
+    expect(result.tabs.every(t => t.groupId === 50)).toBe(true);
+    expect(result.skipped).toEqual([
+      { id: 3, reason: 'pinned tabs cannot be grouped' },
+      { id: 9, reason: 'not found' },
+    ]);
+  });
+
+  it('group_tabs — adds to an existing group, and renames one without tabs', async () => {
+    mockGroups([{ id: 1 }, { id: 2 }]);
+    await api.dispatch('group_tabs', { tabIds: [1], title: 'A' });
+    const added = await api.dispatch('group_tabs', { tabIds: [2], groupId: 50 });
+    expect(added.tabs.map(t => t.id)).toEqual([1, 2]);
+    const renamed = await api.dispatch('group_tabs', { groupId: 50, title: 'B', collapsed: true });
+    expect(renamed.group).toMatchObject({ id: 50, title: 'B', collapsed: true });
+    expect(chrome.tabs.group).toHaveBeenCalledTimes(2);
+  });
+
+  it('group_tabs — rejects an unknown color and a call with nothing to group', async () => {
+    mockGroups([{ id: 1, pinned: true }]);
+    await expect(api.dispatch('group_tabs', { tabIds: [1], color: 'mauve' })).rejects.toThrow(/color must be one of/);
+    await expect(api.dispatch('group_tabs', { tabIds: [1] })).rejects.toThrow(/no tab could be grouped: 1 \(pinned/);
+  });
+
+  it('group_tabs — explains a browser without tab groups', async () => {
+    await expect(api.dispatch('group_tabs', { tabIds: [1], title: 'x' })).rejects.toThrow(/does not offer tab groups/);
+  });
+
+  it('ungroup_tabs — takes tabs out of their group', async () => {
+    const { groupOf } = mockGroups([{ id: 1 }, { id: 2 }]);
+    await api.dispatch('group_tabs', { tabIds: [1, 2] });
+    const result = await api.dispatch('ungroup_tabs', { tabIds: [1, 7] });
+    expect(groupOf.get(1)).toBe(-1);
+    expect(groupOf.get(2)).toBe(50);
+    expect(result.tabs.map(t => t.id)).toEqual([1]);
+    expect(result.skipped).toEqual([{ id: 7, reason: 'not found' }]);
+  });
+
+  it('list_tabs — names each tab\'s group', async () => {
+    mockGroups([{ id: 1 }, { id: 2 }]);
+    await api.dispatch('group_tabs', { tabIds: [2], title: 'News', color: 'red' });
+    const tabs = await api.dispatch('list_tabs', {});
+    expect(tabs[0].groupId).toBeUndefined();
+    expect(tabs[1]).toMatchObject({ groupId: 50, groupTitle: 'News', groupColor: 'red' });
+  });
+
   it('move_tabs — moves tabs next to an anchor in another window', async () => {
     const strip = mockStrip([1, 2, 3], [], [7, 8]);
     const result = await api.dispatch('move_tabs', { tabIds: [3, 1], after: 7 });

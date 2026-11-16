@@ -51,7 +51,7 @@ var errorHints = []struct {
 	{regexp.MustCompile(`(?i)^timeout after \d+ms: wake_tab`),
 		"the tab did not finish loading in time, and calling wake_tab again is unlikely to change that. " +
 			"page_reload the tab, or open_tab with its URL and work in the new tab."},
-	{regexp.MustCompile(`(?i)^timeout after \d+ms: (move_tabs|close_tabs|open_tab)`),
+	{regexp.MustCompile(`(?i)^timeout after \d+ms: (move_tabs|close_tabs|open_tab|group_tabs|ungroup_tabs)`),
 		"the reply was lost, but the browser may have done part or all of the work. Call list_tabs to see the " +
 			"current state before retrying: a blind retry can open a duplicate tab or repeat a move."},
 	{regexp.MustCompile(`(?i)^timeout after \d+ms`),
