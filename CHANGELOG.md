@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.18.1](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.0...v1.18.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **screenshot:** decode the capture without fetch() so Firefox screenshots work ([83a0223](https://github.com/ikari-software/turboweb-mcp/commit/83a0223617543b2d6f750c046fe85b5a8efbc1a4))
+* **screenshot:** decode the capture without fetch() so Firefox screenshots work ([b53fde8](https://github.com/ikari-software/turboweb-mcp/commit/b53fde818919139a41d199e78906f1e4d5a9bc64))
+
 ## [1.18.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.17.0...v1.18.0) (2026-11-16)
 
 
