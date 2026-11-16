@@ -30,8 +30,9 @@ func registerUpdateTools(s *server.MCPServer) {
 				"Verifies the binary against the release's signed SHA256SUMS before replacing the running "+
 				"executable, and swaps in the unpacked extension in place for every connected browser "+
 				"flavor (load-unpacked Chrome + temporary-add-on Firefox), reloading each. A Firefox or Zen running an "+
-				"installed .xpi that is behind gets the verified release .xpi opened in it (macOS): tell the user to "+
-				"click Add (`xpiOpenedIn` lists those browsers). Chrome Web Store installs update via the store. "+
+				"installed .xpi that is behind (connection_status marks it `outdated`, or reports no version) gets the "+
+				"checksum-verified release .xpi opened in it (macOS). When `userActionRequired` is true, tell the user to "+
+				"click Add in the browsers listed in `xpiOpenedIn`. Chrome Web Store installs update via the store. "+
 				"The browser daemon respawns from the new binary "+
 				"automatically on the next call; MCP server instances pick it up on their next launch. "+
 				"Returns `whatsNew` — read it and re-check tool descriptions afterward, since tools or "+

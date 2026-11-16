@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,7 +50,7 @@ type updateStatus struct {
 	// installs per browser flavor.
 	chromeZipURL  string
 	firefoxZipURL string
-	// xpiURL / xpiName are the release's signed Firefox .xpi, offered to
+	// xpiURL / xpiName are the release's AMO-signed Firefox .xpi, offered to
 	// browsers that run an installed (not temporary) copy of the extension.
 	xpiURL  string
 	xpiName string
@@ -283,9 +284,10 @@ type updateResult struct {
 	Message           string   `json:"message"`
 	ExtensionUpdated  bool     `json:"extensionUpdated,omitempty"`
 	ExtensionsUpdated []string `json:"extensionsUpdated,omitempty"` // dist dirs swapped (chrome/firefox)
-	// XPIOpenedIn lists browsers shown the verified release .xpi; each needs
-	// the user to click Add before it runs the new version.
-	XPIOpenedIn []string `json:"xpiOpenedIn,omitempty"`
+	// XPIOpenedIn lists browsers shown the release .xpi; each needs the user
+	// to click Add before it runs the new version, so UserActionRequired is set.
+	XPIOpenedIn        []string `json:"xpiOpenedIn,omitempty"`
+	UserActionRequired bool     `json:"userActionRequired,omitempty"`
 	// WhatsNew is the new release's notes — surfaced so the agent can re-read
 	// the tool surface and invalidate stale memories right after updating.
 	WhatsNew string `json:"whatsNew,omitempty"`
@@ -308,9 +310,7 @@ func performSelfUpdate() (updateResult, error) {
 	if !st.UpdateAvailable {
 		res.Message = fmt.Sprintf("already on the latest version (%s)", serverVersion)
 		// The binary can be current while an installed .xpi lags behind.
-		var note string
-		res.XPIOpenedIn, note = installStaleXPIs(st)
-		res.Message += note
+		offerXPI(&res, st, false)
 		return res, nil
 	}
 	if st.assetURL == "" {
@@ -406,11 +406,26 @@ func performSelfUpdate() (updateResult, error) {
 			"browsers (load-unpacked Chrome / temporary-add-on Firefox; Chrome Web Store installs update via the store)",
 			strings.Join(res.ExtensionsUpdated, ", "))
 	}
-	var note string
-	res.XPIOpenedIn, note = installStaleXPIs(st)
-	res.Message += note
+	firefoxSwapped := false
+	if dir := findFirefoxExtensionDistDir(); dir != "" {
+		firefoxSwapped = slices.Contains(res.ExtensionsUpdated, dir)
+	}
+	offerXPI(&res, st, firefoxSwapped)
 
 	return res, nil
+}
+
+// offerXPI runs the .xpi step and folds its outcome into res. When the user
+// has to act, the message leads with that, so it is not read past.
+func offerXPI(res *updateResult, st *updateStatus, firefoxDistSwapped bool) {
+	var note string
+	res.XPIOpenedIn, note = installStaleXPIs(st, firefoxDistSwapped)
+	res.Message += note
+	if len(res.XPIOpenedIn) > 0 {
+		res.UserActionRequired = true
+		res.Message = fmt.Sprintf("ACTION NEEDED: click Add in %s to finish updating the extension. ",
+			strings.Join(res.XPIOpenedIn, ", ")) + res.Message
+	}
 }
 
 // extTarget is one hot-swappable unpacked extension: its on-disk dir, the

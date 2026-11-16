@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +17,8 @@ import (
 // build without MOZ_REQUIRE_SIGNING (Zen) checks add-on downloads against
 // Mozilla's built-in roots only, so a TLS-filtering proxy (AdGuard and the
 // like) makes every update check and GitHub install fail. self_update covers
-// that gap: it downloads the release .xpi itself, verifies it against the
-// signed SHA256SUMS, and hands it to the browser, which asks the user to Add it.
+// that gap: it downloads the release .xpi itself, checks it against the
+// release's SHA256SUMS, and hands it to the browser, which asks the user to Add it.
 
 const xpiAssetPrefix = "turboweb-mcp-by-ikari-extension-firefox-"
 
@@ -30,14 +31,18 @@ type xpiTarget struct {
 // staleXPIBrowsers picks the browsers that need the release .xpi: Firefox
 // family, not a temporary add-on (those are swapped on disk), and behind
 // latest. An extension that reports no version predates 1.18, so it is behind.
-func staleXPIBrowsers(exts []extensionInfo, latest string) []xpiTarget {
+//
+// skipUnreported leaves out extensions that report no installType: when this
+// run just swapped extension/dist/firefox, such a pre-1.18 extension may be
+// the temporary add-on loaded from there, already updated by the reload.
+func staleXPIBrowsers(exts []extensionInfo, latest string, skipUnreported bool) []xpiTarget {
 	var out []xpiTarget
 	seen := map[string]bool{}
 	for _, e := range exts {
 		if e.Browser != "Zen" && e.Browser != "Firefox" {
 			continue
 		}
-		if e.InstallType == "development" {
+		if e.InstallType == "development" || (skipUnreported && e.InstallType == "") {
 			continue
 		}
 		if e.Version != "" && compareVersions(latest, e.Version) <= 0 {
@@ -54,7 +59,7 @@ func staleXPIBrowsers(exts []extensionInfo, latest string) []xpiTarget {
 
 // Seams for tests.
 var (
-	fetchExtensionInfo = connectedExtensions
+	fetchExtensionInfo = connectedExtensions // (exts, ok)
 	openXPI            = openXPIInBrowser
 	xpiCacheDir        = func() (string, error) {
 		d, err := os.UserCacheDir()
@@ -65,27 +70,39 @@ var (
 	}
 )
 
-// connectedExtensions asks the process holding the browser connections (the
-// daemon, via the relay, or this process) which extensions are connected. A
-// daemon that self_update just replaced respawns on this call and the
-// browsers reconnect within seconds, so an empty answer is retried briefly.
-func connectedExtensions() []extensionInfo {
-	deadline := time.Now().Add(15 * time.Second)
-	for {
+// connectedExtensions reports the extensions connected to the process that
+// holds the browser connections, and whether it could find out. An MCP server
+// asks the daemon over its relay; the daemon (auto-update) reads its own
+// connections; the --self-update CLI, which has neither, asks the daemon's
+// /extensions endpoint. A daemon from before 1.18 answers none of these with
+// extension data, so ok is false until it has been restarted on the new build.
+func connectedExtensions() (exts []extensionInfo, ok bool) {
+	if useRelay {
 		raw, err := send("connection_status", nil, 5000)
-		if err == nil {
-			var st struct {
-				Extensions []extensionInfo `json:"extensions"`
-			}
-			if json.Unmarshal(raw, &st) == nil && len(st.Extensions) > 0 {
-				return st.Extensions
-			}
+		if err != nil {
+			return nil, false
 		}
-		if time.Now().After(deadline) {
-			return nil
+		var st struct {
+			Extensions *[]extensionInfo `json:"extensions"`
 		}
-		time.Sleep(time.Second)
+		if json.Unmarshal(raw, &st) != nil || st.Extensions == nil {
+			return nil, false
+		}
+		return *st.Extensions, true
 	}
+	if open := getOpenBrowsers(); len(open) > 0 {
+		return extensionsOf(open), true
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/extensions", wsPort))
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&exts) != nil {
+		return nil, false
+	}
+	return exts, true
 }
 
 // openXPIInBrowser hands a verified .xpi to the browser, which shows its
@@ -101,14 +118,20 @@ func openXPIInBrowser(browser, path string) error {
 	return nil
 }
 
-// installStaleXPIs downloads and verifies the release .xpi and opens it in
+// installStaleXPIs downloads and checks the release .xpi and opens it in
 // every connected browser whose installed copy is behind. It returns the
-// browsers it prompted and a note for the result message ("" if nothing to do).
-func installStaleXPIs(st *updateStatus) (prompted []string, note string) {
+// browsers it prompted and a note for the result message: empty only when
+// every connected Firefox-family extension is known to be current.
+func installStaleXPIs(st *updateStatus, firefoxDistSwapped bool) (prompted []string, note string) {
 	if st.xpiURL == "" || st.sumsURL == "" {
-		return nil, ""
+		return nil, fmt.Sprintf("; release %s has no Firefox .xpi, so installed Firefox/Zen extensions were not checked", st.LatestVersion)
 	}
-	targets := staleXPIBrowsers(fetchExtensionInfo(), st.LatestVersion)
+	exts, ok := fetchExtensionInfo()
+	if !ok {
+		return nil, "; could not read which browser extensions are connected (the daemon may still run an older build), " +
+			"so no .xpi was offered: restart the MCP server, then call self_update again"
+	}
+	targets := staleXPIBrowsers(exts, st.LatestVersion, firefoxDistSwapped)
 	if len(targets) == 0 {
 		return nil, ""
 	}
@@ -135,17 +158,19 @@ func installStaleXPIs(st *updateStatus) (prompted []string, note string) {
 		prompted = append(prompted, t.Browser)
 	}
 	if len(prompted) > 0 {
-		note = fmt.Sprintf("; opened the verified %s extension in %s: the user must click Add there to finish",
+		note = fmt.Sprintf("; ACTION NEEDED: opened the checksum-verified %s extension in %s, and the user must click Add there to finish",
 			st.LatestVersion, strings.Join(prompted, ", "))
 	}
 	if len(failed) > 0 {
-		note += fmt.Sprintf("; the verified extension is at %s, to open in %s", path, strings.Join(failed, ", "))
+		note += fmt.Sprintf("; the checksum-verified extension is at %s for the user to open in %s", path, strings.Join(failed, ", "))
 	}
 	return prompted, note
 }
 
 // downloadVerified fetches url into path, keeping it only if its SHA-256
-// matches the release's SHA256SUMS entry for name.
+// matches the release's SHA256SUMS entry for name. SHA256SUMS comes from the
+// same release, so this catches corrupt or swapped assets, not a forged
+// release; its cosign signature is not checked here.
 func downloadVerified(url, sumsURL, name, path string) error {
 	want, err := expectedSum(sumsURL, name)
 	if err != nil {
@@ -164,7 +189,7 @@ func downloadVerified(url, sumsURL, name, path string) error {
 		return fmt.Errorf("download failed: %w", err)
 	}
 	if !strings.EqualFold(sum, want) {
-		return fmt.Errorf("checksum mismatch: the download does not match the signed SHA256SUMS")
+		return fmt.Errorf("checksum mismatch: the download does not match the release's SHA256SUMS")
 	}
 	return os.Rename(tmp.Name(), path)
 }

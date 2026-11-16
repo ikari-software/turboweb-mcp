@@ -33,15 +33,15 @@ const jsBrowserFingerprint = `(function(){` +
 type BrowserConnection struct {
 	conn     *websocket.Conn
 	name     string
-	instance string       // per-profile ID from the extension's hello; keys tab refs
+	instance string // per-profile ID from the extension's hello; keys tab refs
 	// extVersion / installType come from the extension's hello ("" from
 	// extensions older than 1.18). installType is chrome.management's:
 	// "normal" (store or .xpi install), "development" (unpacked/temporary)...
 	extVersion  string
 	installType string
-	seq      int          // connection number, the tab-ref key for extensions without an instance ID
-	tabIDs   map[int]bool // tabID -> isActive (true when that tab is the focused one)
-	mu       sync.Mutex   // protects conn writes
+	seq         int          // connection number, the tab-ref key for extensions without an instance ID
+	tabIDs      map[int]bool // tabID -> isActive (true when that tab is the focused one)
+	mu          sync.Mutex   // protects conn writes
 }
 
 type pendingRequest struct {
@@ -156,7 +156,7 @@ func computeClientHues() {
 	// hue and newcomers rotate.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
 	for i, e := range entries {
-		e.info.hue = ((brandHue + i*hueStep) % 360 + 360) % 360
+		e.info.hue = ((brandHue+i*hueStep)%360 + 360) % 360
 	}
 }
 
@@ -169,6 +169,7 @@ func computeClientHues() {
 func RunDaemon() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", handleVersion)
+	mux.HandleFunc("/extensions", handleExtensions)
 	mux.HandleFunc("/reload-extension", handleReloadExtension)
 	mux.HandleFunc("/", handleWSConnection)
 	mux.HandleFunc("/relay", handleRelayConnection)
@@ -599,8 +600,8 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		// an active tab — which could fail with "No active tab found" when
 		// the daemon restarts in the background.
 		var hello struct {
-			Type     string `json:"type"`
-			UA       string `json:"ua"`
+			Type        string `json:"type"`
+			UA          string `json:"ua"`
 			Instance    string `json:"instance"`
 			Version     string `json:"version"`
 			InstallType string `json:"installType"`
@@ -729,29 +730,54 @@ func approvalSummary(open []*BrowserConnection, stamp map[string]any) []map[stri
 	return out
 }
 
-// connectionStatusJSON returns the daemon's view of connectivity. It must run in
-// the process that actually owns the browser WebSockets — the daemon — so
-// connection_status routes here through send() rather than reading a relay
-// client's (always-empty) browsers map.
 // extensionInfo describes one connected browser's extension in
 // connection_status. Version and InstallType are empty for extensions older
-// than 1.18, which did not report them.
+// than 1.18, which did not report them. Outdated is set when the version is
+// known to be behind the latest release.
 type extensionInfo struct {
 	Browser     string `json:"browser"`
 	Version     string `json:"version,omitempty"`
 	InstallType string `json:"installType,omitempty"`
+	Outdated    bool   `json:"outdated,omitempty"`
 }
 
+// extensionsOf lists the extensions of the given connections.
+func extensionsOf(open []*BrowserConnection) []extensionInfo {
+	exts := make([]extensionInfo, len(open))
+	latest := ""
+	if u := peekUpdateStatus(); u != nil {
+		latest = u.LatestVersion
+	}
+	for i, b := range open {
+		b.mu.Lock()
+		exts[i] = extensionInfo{Browser: b.name, Version: b.extVersion, InstallType: b.installType}
+		b.mu.Unlock()
+		exts[i].Outdated = latest != "" && exts[i].Version != "" && compareVersions(latest, exts[i].Version) > 0
+	}
+	return exts
+}
+
+// handleExtensions serves extensionsOf for the daemon's connections, for the
+// --self-update CLI, which has no relay to ask through.
+func handleExtensions(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(extensionsOf(getOpenBrowsers()))
+}
+
+// connectionStatusJSON returns the daemon's view of connectivity. It must run in
+// the process that actually owns the browser WebSockets — the daemon — so
+// connection_status routes here through send() rather than reading a relay
+// client's (always-empty) browsers map.
 func connectionStatusJSON() json.RawMessage {
 	open := getOpenBrowsers()
 	names := make([]string, len(open))
-	exts := make([]extensionInfo, len(open))
 	for i, b := range open {
 		b.mu.Lock()
 		names[i] = b.name
-		exts[i] = extensionInfo{Browser: b.name, Version: b.extVersion, InstallType: b.installType}
 		b.mu.Unlock()
 	}
+	exts := extensionsOf(open)
 	status := map[string]any{
 		"connected":      len(open) > 0 || getBiDi() != nil,
 		"extension":      len(open) > 0,
