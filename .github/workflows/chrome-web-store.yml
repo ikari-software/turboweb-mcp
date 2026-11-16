@@ -22,9 +22,7 @@ name: chrome-web-store
 #   3. Create a Google Cloud service account, enable the Chrome Web Store API,
 #      then add the service account's email under Account in the Developer
 #      Dashboard. One service account per publisher.
-#   4. Grant that service account roles/iam.serviceAccountTokenCreator **on
-#      itself** — a bare key cannot mint an access token without it.
-#   5. Repository secrets:
+#   4. Repository secrets:
 #        CWS_SA_JSON         the service account's JSON key, verbatim
 #        CWS_PUBLISHER_ID    from .../publishers/<id>/ in the dashboard URL
 #        CWS_ITEM_ID         the 32-character extension id
@@ -103,21 +101,62 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Scopes are comma-separated per the action's documented format. The
-      # access_token output is the raw OAuth2 token; auth_token is a different
-      # thing (a self-signed JWT) and is not accepted by this API.
+      # Mints the OAuth2 access token straight from the key with the JWT-bearer
+      # grant (RFC 7523) against oauth2.googleapis.com. google-github-actions/auth
+      # goes through iamcredentials.googleapis.com instead, which needs that API
+      # enabled plus serviceAccountTokenCreator — neither is required here, and
+      # the 1.17.0 release failed on exactly that. A self-signed JWT on its own
+      # is not accepted by this API; it has to be exchanged for a token.
       - name: Authenticate to the Chrome Web Store API
         if: steps.creds.outputs.configured == 'true'
         id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.CWS_SA_JSON }}
-          token_format: access_token
-          access_token_scopes: 'https://www.googleapis.com/auth/chromewebstore'
-          access_token_lifetime: '3600s'
-          # The extension build needs no GCP project; don't export the extra
-          # environment variables other steps might misread.
-          export_environment_variables: 'false'
+        env:
+          CWS_SA_JSON: ${{ secrets.CWS_SA_JSON }}
+        run: |
+          node - <<'EOF'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+
+          const sa = JSON.parse(process.env.CWS_SA_JSON);
+          const b64url = (v) => Buffer.from(v).toString('base64url');
+          const now = Math.floor(Date.now() / 1000);
+          const unsigned = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' })) + '.' +
+            b64url(JSON.stringify({
+              iss: sa.client_email,
+              scope: 'https://www.googleapis.com/auth/chromewebstore',
+              aud: 'https://oauth2.googleapis.com/token',
+              iat: now,
+              exp: now + 3600, // Google's ceiling
+            }));
+          const sig = crypto.sign('RSA-SHA256', Buffer.from(unsigned), sa.private_key);
+          const assertion = unsigned + '.' + sig.toString('base64url');
+
+          (async () => {
+            const res = await fetch('https://oauth2.googleapis.com/token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({
+                grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                assertion,
+              }),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok || !body.access_token) {
+              // The error body names the problem (invalid_grant etc.) and holds
+              // no secret; never print the assertion itself.
+              console.log(`::error::token exchange failed (HTTP ${res.status}): ` +
+                `${body.error || ''} ${body.error_description || ''}`.trim());
+              process.exit(1);
+            }
+            // Mask before the value can appear anywhere else in the log.
+            console.log(`::add-mask::${body.access_token}`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT,
+              `access_token=${body.access_token}\n`);
+          })().catch((e) => {
+            console.log(`::error::token exchange failed: ${e.message}`);
+            process.exit(1);
+          });
+          EOF
 
       - name: Upload and submit for review
         if: steps.creds.outputs.configured == 'true'
