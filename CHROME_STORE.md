@@ -147,11 +147,13 @@ are unchanged between versions, so V1 refresh tokens keep working.
 Auth is a **service account**, which V2 supports and V1 did not. Create one in
 Google Cloud, enable the Chrome Web Store API, then add its email under
 *Account* in the Developer Dashboard — that link is what gives it authority
-over the publisher's items. It also needs `roles/iam.serviceAccountTokenCreator`
-**on itself**, because minting an access token from a bare key requires it. The
-workflow requests the access token through `google-github-actions/auth` with
-`token_format: access_token` and the single scope
-`https://www.googleapis.com/auth/chromewebstore`.
+over the publisher's items. No IAM role or extra API is needed: the workflow
+signs a JWT with the key and exchanges it at `https://oauth2.googleapis.com/token`
+(the JWT-bearer grant) for an access token with the single scope
+`https://www.googleapis.com/auth/chromewebstore`. It deliberately avoids
+`google-github-actions/auth`, whose `token_format: access_token` path goes
+through the IAM Service Account Credentials API and fails unless that API is
+enabled in the project.
 
 Secrets to add (Settings → Secrets and variables → Actions):
 
