@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.17.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.16.0...v1.17.0) (2026-11-16)
+
+
+### Features
+
+* group_tabs and ungroup_tabs, and group names in list_tabs ([5adcf19](https://github.com/ikari-software/turboweb-mcp/commit/5adcf194d68a778a07d6e487c0a2ad39deeeac1a))
+* group_tabs and ungroup_tabs, and group names in list_tabs ([168d2e3](https://github.com/ikari-software/turboweb-mcp/commit/168d2e3d088a2ff8c297b606d79307e1f6a7f323))
+* hide overlay text chrome in screenshots (+ dep upgrades) ([#42](https://github.com/ikari-software/turboweb-mcp/issues/42)) ([004f936](https://github.com/ikari-software/turboweb-mcp/commit/004f936cbdf88c1f2526c0acdd27f64cca66c54f))
+
 ## [1.16.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.15.0...v1.16.0) (2026-11-15)
 
 
