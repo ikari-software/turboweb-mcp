@@ -29,11 +29,13 @@ func registerUpdateTools(s *server.MCPServer) {
 			mcp.WithDescription("Download and install the latest turboweb-mcp release for this platform. "+
 				"Verifies the binary against the release's signed SHA256SUMS before replacing the running "+
 				"executable, and swaps in the unpacked extension in place for every connected browser "+
-				"flavor (load-unpacked Chrome + temporary-add-on Firefox), reloading each; Chrome Web "+
-				"Store / Firefox AMO installs auto-update via the store / update_url. The browser daemon respawns from the new binary "+
+				"flavor (load-unpacked Chrome + temporary-add-on Firefox), reloading each. A Firefox or Zen running an "+
+				"installed .xpi that is behind gets the verified release .xpi opened in it (macOS): tell the user to "+
+				"click Add (`xpiOpenedIn` lists those browsers). Chrome Web Store installs update via the store. "+
+				"The browser daemon respawns from the new binary "+
 				"automatically on the next call; MCP server instances pick it up on their next launch. "+
 				"Returns `whatsNew` — read it and re-check tool descriptions afterward, since tools or "+
-				"behavior may have changed; invalidate stale memory. No-op if already up to date."),
+				"behavior may have changed; invalidate stale memory. If the binary is already current, only a lagging .xpi is offered."),
 		),
 		handleSelfUpdate,
 	)

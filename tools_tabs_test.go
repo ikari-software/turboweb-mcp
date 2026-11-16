@@ -509,3 +509,22 @@ func TestListTabs_PrefixesGroupIDs(t *testing.T) {
 		}
 	})
 }
+
+func TestConnectionStatus_ListsEachBrowsersExtension(t *testing.T) {
+	withZenAndFirefox(t, func(_, _ *tabBrowser, _, _ string) {
+		var st struct {
+			Extensions []extensionInfo `json:"extensions"`
+		}
+		if err := json.Unmarshal(connectionStatusJSON(), &st); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range st.Extensions {
+			names = append(names, e.Browser)
+		}
+		slices.Sort(names)
+		if fmt.Sprint(names) != "[Firefox Zen]" {
+			t.Errorf("extensions = %+v; want one entry per connected browser", st.Extensions)
+		}
+	})
+}

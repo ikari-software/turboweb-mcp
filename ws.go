@@ -34,6 +34,11 @@ type BrowserConnection struct {
 	conn     *websocket.Conn
 	name     string
 	instance string       // per-profile ID from the extension's hello; keys tab refs
+	// extVersion / installType come from the extension's hello ("" from
+	// extensions older than 1.18). installType is chrome.management's:
+	// "normal" (store or .xpi install), "development" (unpacked/temporary)...
+	extVersion  string
+	installType string
 	seq      int          // connection number, the tab-ref key for extensions without an instance ID
 	tabIDs   map[int]bool // tabID -> isActive (true when that tab is the focused one)
 	mu       sync.Mutex   // protects conn writes
@@ -596,11 +601,15 @@ func handleWSConnection(w http.ResponseWriter, r *http.Request) {
 		var hello struct {
 			Type     string `json:"type"`
 			UA       string `json:"ua"`
-			Instance string `json:"instance"`
+			Instance    string `json:"instance"`
+			Version     string `json:"version"`
+			InstallType string `json:"installType"`
 		}
 		if json.Unmarshal(message, &hello) == nil && hello.Type == "hello" && hello.UA != "" {
 			bc.mu.Lock()
 			bc.instance = hello.Instance
+			bc.extVersion = hello.Version
+			bc.installType = hello.InstallType
 			switch {
 			case contains(hello.UA, "Zen"):
 				bc.name = "Zen"
@@ -724,12 +733,23 @@ func approvalSummary(open []*BrowserConnection, stamp map[string]any) []map[stri
 // the process that actually owns the browser WebSockets — the daemon — so
 // connection_status routes here through send() rather than reading a relay
 // client's (always-empty) browsers map.
+// extensionInfo describes one connected browser's extension in
+// connection_status. Version and InstallType are empty for extensions older
+// than 1.18, which did not report them.
+type extensionInfo struct {
+	Browser     string `json:"browser"`
+	Version     string `json:"version,omitempty"`
+	InstallType string `json:"installType,omitempty"`
+}
+
 func connectionStatusJSON() json.RawMessage {
 	open := getOpenBrowsers()
 	names := make([]string, len(open))
+	exts := make([]extensionInfo, len(open))
 	for i, b := range open {
 		b.mu.Lock()
 		names[i] = b.name
+		exts[i] = extensionInfo{Browser: b.name, Version: b.extVersion, InstallType: b.installType}
 		b.mu.Unlock()
 	}
 	status := map[string]any{
@@ -740,6 +760,7 @@ func connectionStatusJSON() json.RawMessage {
 		"extensionCount": len(open),
 		"wsPort":         wsPort,
 		"version":        serverVersion,
+		"extensions":     exts,
 	}
 	// Surface "an update is available" passively — read-only, from the
 	// cache the background checker warms. Never triggers a GitHub call,

@@ -288,7 +288,13 @@ function connect() {
       return u;
     })();
     const instance = await getInstanceId();
-    try { ws.send(JSON.stringify({ type: 'hello', ua: _helloUA, instance })); } catch (_) {}
+    // version + installType let self_update tell an installed .xpi (which it
+    // must hand the browser to install) from an unpacked or temporary add-on
+    // (which it swaps on disk). getSelf needs no "management" permission.
+    let installType = '';
+    try { installType = (await chrome.management?.getSelf?.())?.installType || ''; } catch (_) {}
+    const version = chrome.runtime.getManifest?.()?.version || '';
+    try { ws.send(JSON.stringify({ type: 'hello', ua: _helloUA, instance, version, installType })); } catch (_) {}
   };
 
   ws.onmessage = async (event) => {

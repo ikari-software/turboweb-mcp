@@ -49,6 +49,10 @@ type updateStatus struct {
 	// installs per browser flavor.
 	chromeZipURL  string
 	firefoxZipURL string
+	// xpiURL / xpiName are the release's signed Firefox .xpi, offered to
+	// browsers that run an installed (not temporary) copy of the extension.
+	xpiURL  string
+	xpiName string
 
 	// Extension directory info (exported for check_for_updates consumers).
 	// ExtensionDir is the load-unpacked chrome directory found on this host,
@@ -192,6 +196,10 @@ func fetchLatestRelease() *updateStatus {
 			st.chromeZipURL = a.URL
 		case "turboweb-mcp-by-ikari-extension-firefox.zip":
 			st.firefoxZipURL = a.URL
+		default:
+			if strings.HasPrefix(a.Name, xpiAssetPrefix) && strings.HasSuffix(a.Name, ".xpi") {
+				st.xpiURL, st.xpiName = a.URL, a.Name
+			}
 		}
 	}
 	if st.UpdateAvailable && st.assetURL == "" {
@@ -269,12 +277,15 @@ func startUpdateChecker() {
 
 // updateResult is the outcome of a self-update attempt.
 type updateResult struct {
-	Updated          bool   `json:"updated"`
-	FromVersion      string `json:"fromVersion"`
-	ToVersion        string `json:"toVersion"`
+	Updated           bool     `json:"updated"`
+	FromVersion       string   `json:"fromVersion"`
+	ToVersion         string   `json:"toVersion"`
 	Message           string   `json:"message"`
 	ExtensionUpdated  bool     `json:"extensionUpdated,omitempty"`
 	ExtensionsUpdated []string `json:"extensionsUpdated,omitempty"` // dist dirs swapped (chrome/firefox)
+	// XPIOpenedIn lists browsers shown the verified release .xpi; each needs
+	// the user to click Add before it runs the new version.
+	XPIOpenedIn []string `json:"xpiOpenedIn,omitempty"`
 	// WhatsNew is the new release's notes — surfaced so the agent can re-read
 	// the tool surface and invalidate stale memories right after updating.
 	WhatsNew string `json:"whatsNew,omitempty"`
@@ -296,6 +307,10 @@ func performSelfUpdate() (updateResult, error) {
 	}
 	if !st.UpdateAvailable {
 		res.Message = fmt.Sprintf("already on the latest version (%s)", serverVersion)
+		// The binary can be current while an installed .xpi lags behind.
+		var note string
+		res.XPIOpenedIn, note = installStaleXPIs(st)
+		res.Message += note
 		return res, nil
 	}
 	if st.assetURL == "" {
@@ -388,9 +403,12 @@ func performSelfUpdate() (updateResult, error) {
 		res.ExtensionUpdated = true
 		broadcastExtensionReload(st.LatestVersion)
 		res.Message += fmt.Sprintf("; refreshed unpacked extension(s) at %s — reloading connected "+
-			"browsers (load-unpacked Chrome / temporary-add-on Firefox; Store/AMO installs auto-update separately)",
+			"browsers (load-unpacked Chrome / temporary-add-on Firefox; Chrome Web Store installs update via the store)",
 			strings.Join(res.ExtensionsUpdated, ", "))
 	}
+	var note string
+	res.XPIOpenedIn, note = installStaleXPIs(st)
+	res.Message += note
 
 	return res, nil
 }
