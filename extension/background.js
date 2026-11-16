@@ -280,10 +280,19 @@ function connect() {
     // navigator.userAgent is available in both Chrome service workers and
     // Firefox event pages. The window.zen probe is caught by try/catch so
     // it works safely in service worker contexts where window is undefined.
-    const _helloUA = (function() {
+    const _helloUA = await (async function() {
       const u = (typeof navigator !== 'undefined' ? navigator.userAgent : '');
       try {
         if (typeof window !== 'undefined' && typeof window.zen !== 'undefined') return 'Zen/' + u;
+      } catch (_) {}
+      // Zen's UA is stock Firefox and its background page has no window.zen,
+      // but runtime.getBrowserInfo() (Firefox-only) reports the app's own
+      // name from application.ini: "Zen". Without this the daemon calls Zen
+      // "Firefox", and self_update would open the .xpi in the wrong app.
+      try {
+        const rt = (typeof browser !== 'undefined' && browser.runtime) || chrome.runtime;
+        const info = await rt?.getBrowserInfo?.();
+        if (info?.name === 'Zen') return 'Zen/' + u;
       } catch (_) {}
       return u;
     })();

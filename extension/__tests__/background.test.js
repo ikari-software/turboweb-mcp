@@ -1603,6 +1603,21 @@ describe('agent approval', () => {
     }
   });
 
+  it('hello — names Zen from runtime.getBrowserInfo, since its UA says Firefox', async () => {
+    chrome.runtime.getBrowserInfo = vi.fn().mockResolvedValue({ name: 'Zen', vendor: 'Mozilla' });
+    try {
+      const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+      if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }
+      api.connect();
+      const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+      ws._open();
+      await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+      expect(JSON.parse(ws.send.mock.calls[0][0]).ua).toMatch(/^Zen\//);
+    } finally {
+      delete chrome.runtime.getBrowserInfo;
+    }
+  });
+
   it('holds a command at the socket until the agent is approved', async () => {
     const last = MockWebSocket.instances[MockWebSocket.instances.length - 1];
     if (last && last.readyState !== WebSocket.CLOSED) { last.readyState = WebSocket.CLOSED; last.onclose?.(); }
