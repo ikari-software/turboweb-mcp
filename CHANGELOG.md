@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.19.0](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.3...v1.19.0) (2026-11-17)
+
+
+### Features
+
+* **approval:** don't block on the approval window; show what TurboWeb saw ([02cadf9](https://github.com/ikari-software/turboweb-mcp/commit/02cadf9d0b3bbf35dcd49a8640a7862bdc45a1f0))
+
 ## [1.18.3](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.2...v1.18.3) (2026-11-17)
 
 
