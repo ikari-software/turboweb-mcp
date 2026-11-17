@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The latest release's
 notes are also surfaced to agents via `check_for_updates` / `self_update`
 (`whatsNew`) so they can invalidate stale assumptions after updating.
 
+## [1.18.3](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.2...v1.18.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* **zen:** detect Zen by getBrowserInfo's zen field ([f39e32b](https://github.com/ikari-software/turboweb-mcp/commit/f39e32bde7529873c6b04b1b99b03f0482db7f54))
+* **zen:** detect Zen by getBrowserInfo's zen field ([c3c0c9f](https://github.com/ikari-software/turboweb-mcp/commit/c3c0c9fdc46c9ea761f25503da8379cffc80257d))
+
 ## [1.18.2](https://github.com/ikari-software/turboweb-mcp/compare/v1.18.1...v1.18.2) (2026-11-16)
 
 
