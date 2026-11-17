@@ -1620,8 +1620,10 @@ describe('agent approval', () => {
   }
 
   it('hello — names Zen from runtime.getBrowserInfo, since its UA says Firefox', async () => {
-    const ua = await helloUA(vi.fn().mockResolvedValue({ name: 'Zen', vendor: 'Mozilla' }));
-    expect(ua).toBe('Zen/' + navigator.userAgent);
+    // What Zen 1.24 really returns: name masked as Firefox, plus a zen field.
+    const real = { name: 'Firefox', vendor: 'Mozilla', version: '146.0', zen: { version: '1.24.2b' } };
+    expect(await helloUA(vi.fn().mockResolvedValue(real))).toBe('Zen/' + navigator.userAgent);
+    expect(await helloUA(vi.fn().mockResolvedValue({ name: 'Zen', vendor: 'Mozilla' }))).toBe('Zen/' + navigator.userAgent);
   });
 
   it('hello — leaves the UA alone for Firefox, Chrome (no getBrowserInfo) and a failed lookup', async () => {
