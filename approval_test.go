@@ -401,3 +401,56 @@ func TestIntroduce_WaitsForTheBrowsersAnswer(t *testing.T) {
 		t.Errorf("got %q", text)
 	}
 }
+
+// In daemon mode connection_status runs in the daemon, whose own session is
+// never the one a browser approved. It must ask about the relay agent that
+// called (the stamp the relay handler attached), or an approved agent reads
+// "needed" forever.
+func TestConnectionStatus_AsksAboutTheCallingAgent(t *testing.T) {
+	withZenAndFirefox(t, func(zen, _ *tabBrowser, _, _ string) {
+		caller := map[string]any{"id": "relay-agent-1", "name": "Claude"}
+		if _, err := sendDirect("connection_status", map[string]any{"_client": caller}, 3000); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := zen.params("approval_state")["_client"].(map[string]any)
+		if got["id"] != "relay-agent-1" {
+			t.Errorf("approval_state asked about %v, want the calling agent relay-agent-1", got["id"])
+		}
+		// No caller stamp (in-process mode): fall back to this process's session.
+		if _, err := sendDirect("connection_status", map[string]any{}, 3000); err != nil {
+			t.Fatal(err)
+		}
+		got, _ = zen.params("approval_state")["_client"].(map[string]any)
+		if got["id"] != clientIDFromKey(sessionKey) {
+			t.Errorf("without a caller, approval_state asked about %v, want this session", got["id"])
+		}
+	})
+}
+
+// The user not having answered yet is not a failure: introduce returns a
+// result saying the window is open, so the agent never sits in a call long
+// enough for its host to time it out.
+func TestIntroduce_PendingIsAnAnswerNotAnError(t *testing.T) {
+	pending := func() map[string]any { return map[string]any{"result": map[string]any{"approved": false, "pending": true}} }
+	declined := func() map[string]any {
+		return map[string]any{"error": `The user declined to let "Claude" use this browser. What to do: stop.`}
+	}
+	withZenAndFirefox(t, func(zen, ff *tabBrowser, zenPrefix, _ string) {
+		zen.approve, ff.approve = pending, declined
+		res, err := handleIntroduce(context.Background(), reqWith(map[string]any{"name": "Claude", "task": "Sorting tabs"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := extractText(t, res)
+		if res.IsError {
+			t.Fatalf("pending must not be an error, got %q", text)
+		}
+		if strings.Contains(text, "approved you") || !strings.Contains(text, "Approval requested") ||
+			!strings.Contains(text, zenPrefix) {
+			t.Errorf("want a pending note naming %s, got %q", zenPrefix, text)
+		}
+		if ms, _ := zen.params("approve_agent")["timeoutMs"].(float64); ms <= 0 || ms > 30000 {
+			t.Errorf("introduce asked the browser to wait %vms; keep it under host tool timeouts", ms)
+		}
+	})
+}

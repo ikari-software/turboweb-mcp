@@ -1557,7 +1557,7 @@ describe('agent approval', () => {
   it('does not hold an ordinary command for long, and leaves the prompt open', async () => {
     vi.useFakeTimers();
     const pending = api.ensureApproved(agent());
-    const failed = expect(pending).rejects.toThrow(/has not yet approved "Claude".*call introduce again/);
+    const failed = expect(pending).rejects.toThrow(/not answered yet whether "Claude".*carry on with work that does not need the browser/);
     await vi.advanceTimersByTimeAsync(15000);
     await failed;
     expect(api.approvals.pending.size).toBe(1);
@@ -1582,6 +1582,8 @@ describe('agent approval', () => {
     const client = api.takeClient(params, 'fallback');
     expect(params).toEqual({ tabId: 4 });
     expect(client).toMatchObject({ id: 'a1', name: 'Claude', pid: 7 });
+    expect(api.takeClient({ _client: { id: 'a2', workdir: '~/src/x', branch: 'main' } }, ''))
+      .toMatchObject({ workdir: '~/src/x', branch: 'main' });
     expect(client.task).toHaveLength(200);
     expect(client).not.toHaveProperty('extra');
     expect(api.takeClient({}, 'Cursor')).toEqual({ id: 'legacy', name: 'Cursor', legacy: true });
@@ -1669,6 +1671,21 @@ describe('agent approval', () => {
     answer(true, 'b2', { id: 'test-id', url: 'chrome-extension://test-id/approve.html?id=b2' });
     await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
     expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({ id: '9', result: { approved: true } });
+
+    // Unanswered: a daemon that understands it is told "pending" (a result,
+    // so introduce returns) and the window stays open for the user.
+    ws.send.mockClear();
+    api.approvals.pending.clear();
+    ws._receive({ id: '10', action: 'approve_agent', params: { _client: agent({ id: 'c3' }), timeoutMs: 30, acceptsPending: true } });
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({ id: '10', result: { approved: false, pending: true } });
+    expect(api.approvals.pending.has('c3')).toBe(true);
+
+    // An older daemon would read any result as a yes, so it gets an error.
+    ws.send.mockClear();
+    ws._receive({ id: '11', action: 'approve_agent', params: { _client: agent({ id: 'c3' }), timeoutMs: 30 } });
+    await vi.waitFor(() => expect(ws.send).toHaveBeenCalled());
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toMatchObject({ id: '11', error: expect.stringMatching(/not answered yet/) });
   });
 });
 

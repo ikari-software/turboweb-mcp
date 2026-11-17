@@ -395,6 +395,15 @@ function connect() {
       try {
         await ensureApproved(client, { explicit: asking, timeoutMs: params.timeoutMs, override });
       } catch (e) {
+        if (asking && e.pending && params.acceptsPending === true) {
+          // introduce ran out of waiting while the window is still open. That
+          // is an answer, not a failure: the agent carries on and the user's
+          // decision applies to its next command. Only a daemon that says it
+          // understands this gets it: an older one reads any result as a yes.
+          logActivity({ ...baseEntry, status: 'done', duration: Math.round(performance.now() - start), timestamp: Date.now() });
+          ws?.send(JSON.stringify({ id: msg.id, result: { approved: false, pending: true } }));
+          return;
+        }
         stats.errors++;
         logActivity({ ...baseEntry, status: 'error', duration: Math.round(performance.now() - start), error: e.message, timestamp: Date.now() });
         broadcast({ type: 'stats', ...getStats() });
@@ -509,7 +518,7 @@ chrome.tabs.onActivated.addListener(() => {
 // a window this extension opens. The prompt cannot live in a web page: a page
 // could click it. Approvals are per agent session (the id the daemon stamps
 // on each command) and are forgotten when the browser restarts.
-const APPROVAL_WAIT_MS = 120000;      // `introduce` waits this long for an answer
+const APPROVAL_WAIT_MS = 30000;       // cap on how long `introduce` waits before saying "pending"
 const APPROVAL_LAZY_WAIT_MS = 15000;  // any other command waits this long, then reports
 const APPROVAL_REASK_MS = 30000;      // a declined agent cannot ask again sooner
 const approvals = {
@@ -538,6 +547,8 @@ function takeClient(params, fallbackName) {
     task: text(c.task, 200),
     hostName: text(c.hostName, 80),
     project: text(c.project, 120),
+    workdir: text(c.workdir, 200),
+    branch: text(c.branch, 80),
     remote: text(c.remote, 80),
     origin: text(c.origin, 200),
     pid: Number.isInteger(c.pid) ? c.pid : 0,
@@ -626,8 +637,9 @@ function approvalMessage(client, decision) {
       return `This browser could not open the approval window for ${who}. ` +
         'What to do: tell the user; they can turn off "Ask before an agent connects" in the TurboWeb popup if they trust this setup.';
     default:
-      return `The user has not yet approved ${who}: an approval window is open in their browser. ` +
-        'What to do: tell the user to answer it, then call introduce again, which waits for their decision.';
+      return `The user has not answered yet whether ${who} may use this browser: the approval window is still open. ` +
+        'What to do: tell the user it is waiting for them, carry on with work that does not need the browser, ' +
+        'and retry this call later, or check connection_status (approval[].state) first.';
   }
 }
 
@@ -678,15 +690,18 @@ async function ensureApproved(client, { explicit = false, timeoutMs, override = 
       throw new Error(approvalMessage(client, 'dismissed'));
     case 'unavailable':
       throw new Error(approvalMessage(client, 'unavailable'));
-    default:
-      throw new Error(approvalMessage(client, 'waiting'));
+    default: {
+      const err = new Error(approvalMessage(client, 'waiting'));
+      err.pending = true; // still open: not a refusal
+      throw err;
+    }
   }
 }
 
 async function openApprovalWindow(entry) {
   const url = chrome.runtime.getURL('approve.html') + '?id=' + encodeURIComponent(entry.client.id);
   try {
-    const win = await chrome.windows.create({ url, type: 'popup', width: 480, height: 520, focused: true });
+    const win = await chrome.windows.create({ url, type: 'popup', width: 480, height: 640, focused: true });
     entry.windowId = win?.id;
   } catch {
     try {

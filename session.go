@@ -42,6 +42,7 @@ type sessionInfo struct {
 	model         string // self-introduced model id
 	task          string // self-introduced one-line task
 	project       string // basename of the working directory
+	workdir       string // working directory, with the home directory as ~
 	labelOverride string // MCP_CLIENT_LABEL
 }
 
@@ -84,6 +85,7 @@ func initSession() {
 
 	cwd, _ := os.Getwd()
 	sess.project = projectName(cwd)
+	sess.workdir = homeAbbrev(cwd)
 	sess.host = detectHostFromAncestry(os.Getppid())
 	if sess.host == "" {
 		sess.host = detectHostFromEnv(os.Environ())
@@ -158,7 +160,9 @@ func applyIntroduction(in introduction) {
 	if v := clampText(in.Task, 120); v != "" {
 		sess.task = v
 	}
-	if v := clampText(in.Host, 40); v != "" {
+	// The host app names itself in the MCP handshake, which the model cannot
+	// touch; a model's guess only fills the gap when the host sent nothing.
+	if v := clampText(in.Host, 40); v != "" && sess.clientName == "" {
 		if h := normaliseClientType(v); h != "" {
 			sess.host = h
 		}
@@ -228,6 +232,8 @@ func snapshotSession() map[string]any {
 		"model":         sess.model,
 		"task":          sess.task,
 		"project":       sess.project,
+		"workdir":       sess.workdir,
+		"branch":        gitBranch(sess.workdir),
 		"clientName":    sess.clientName,
 		"clientVersion": sess.clientVersion,
 		"connectedAt":   sessionStartedAt.UnixMilli(),
@@ -517,8 +523,87 @@ func describeSession() string {
 	if sess.model != "" {
 		parts = append(parts, "model="+sess.model)
 	}
+	if sess.workdir != "" {
+		w := "in " + sess.workdir
+		if b := gitBranch(sess.workdir); b != "" {
+			w += " (branch " + b + ")"
+		}
+		parts = append(parts, w)
+	}
 	if sess.task != "" {
 		parts = append(parts, fmt.Sprintf("task=%q", sess.task))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// homeAbbrev shows a path the way a person would recognise it: ~/src/x,
+// not /Users/someone/src/x.
+func homeAbbrev(p string) string {
+	if p == "" {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if p == home {
+			return "~"
+		}
+		if rest, ok := strings.CutPrefix(p, home+string(filepath.Separator)); ok {
+			return "~/" + rest
+		}
+	}
+	return p
+}
+
+// gitBranch names the branch checked out in the repository holding dir (a
+// short commit id when detached), or "" outside a repository. It reads
+// .git/HEAD rather than running git, so it is cheap enough to call on every
+// snapshot and stays current when the user switches branches. Agents are
+// often vague about what they are working on; this is a fact the human can
+// recognise.
+func gitBranch(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(dir, "~"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = home + rest
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		gitPath := filepath.Join(d, ".git")
+		if fi, err := os.Stat(gitPath); err == nil {
+			gitDir := gitPath
+			if !fi.IsDir() {
+				// A worktree or submodule: .git is a file pointing at the real one.
+				b, err := os.ReadFile(gitPath)
+				if err != nil {
+					return ""
+				}
+				target, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir: ")
+				if !ok {
+					return ""
+				}
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(d, target)
+				}
+				gitDir = target
+			}
+			head, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+			if err != nil {
+				return ""
+			}
+			h := strings.TrimSpace(string(head))
+			if ref, ok := strings.CutPrefix(h, "ref: refs/heads/"); ok {
+				return clampText(ref, 80)
+			}
+			if len(h) >= 7 {
+				return h[:7]
+			}
+			return ""
+		}
+		if parent := filepath.Dir(d); parent == d {
+			return ""
+		}
+	}
 }

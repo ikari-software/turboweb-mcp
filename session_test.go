@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -141,7 +143,9 @@ func TestSessionLabelLayers(t *testing.T) {
 		t.Fatalf("after introduce = %q", got)
 	}
 	snap := snapshotSession()
-	if snap["sessionType"] != "claude-code" || snap["hostName"] != "Claude Code" ||
+	// The host named itself in the handshake, which the model cannot touch;
+	// the model claiming to run in Claude Code does not override it.
+	if snap["sessionType"] != "fancy-agent" || snap["hostName"] != "fancy-agent" ||
 		snap["model"] != "claude-opus-4" || snap["task"] != "Testing labels" {
 		t.Fatalf("snapshot = %v", snap)
 	}
@@ -286,5 +290,53 @@ func TestIntroduceRejectsBlankName(t *testing.T) {
 	res := callTool(t, s, "introduce", map[string]any{"name": "  \n ", "intent": "x"})
 	if !res.IsError || hasIntroduced() {
 		t.Fatal("blank name must not count as an introduction")
+	}
+}
+
+func TestIntroduceHostOnlyFillsAGap(t *testing.T) {
+	resetSession(t)
+	// No handshake name: the agent's word is all there is.
+	applyIntroduction(introduction{Name: "Claude", Host: "Claude Code"})
+	if got := getSessionType(); got != "claude-code" {
+		t.Fatalf("without a handshake, host = %q, want claude-code", got)
+	}
+}
+
+func TestGitBranchReadsHEAD(t *testing.T) {
+	dir := t.TempDir()
+	if gitBranch(dir) != "" {
+		t.Fatal("outside a repository there is no branch")
+	}
+	git := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(git, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(git, "HEAD"), "ref: refs/heads/fix/zen\n")
+	if got := gitBranch(sub); got != "fix/zen" {
+		t.Errorf("from a subfolder: %q, want fix/zen", got)
+	}
+	write(filepath.Join(git, "HEAD"), "0123456789abcdef0123456789abcdef01234567\n")
+	if got := gitBranch(dir); got != "0123456" {
+		t.Errorf("detached: %q, want 0123456", got)
+	}
+	// A worktree: .git is a file naming the real git dir.
+	wt := t.TempDir()
+	real := filepath.Join(t.TempDir(), "wt-git")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(real, "HEAD"), "ref: refs/heads/feature\n")
+	write(filepath.Join(wt, ".git"), "gitdir: "+real+"\n")
+	if got := gitBranch(wt); got != "feature" {
+		t.Errorf("worktree: %q, want feature", got)
 	}
 }

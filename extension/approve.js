@@ -24,16 +24,24 @@ function describeOrigin(remote, origin) {
 }
 
 function renderApproval(doc, client) {
-  const set = (id, text) => { doc.getElementById(id).textContent = text; };
+  const set = (id, text, unknown = false) => {
+    const el = doc.getElementById(id);
+    el.textContent = text;
+    el.classList.toggle('unknown', unknown);
+  };
   set('name', client.name || 'Unnamed agent');
-  set('about', [client.model, client.hostName, client.project && `in ${client.project}`, client.pid ? `pid ${client.pid}` : '']
-    .filter(Boolean).join(' · '));
+  set('model', client.model || 'Not stated', !client.model);
   set('task', client.task || (client.legacy
     ? 'Nothing: it is connected through an older TurboWeb that does not say who is asking.'
-    : 'It did not say.'));
+    : 'It did not say.'), !client.task);
+  set('app', client.hostName || 'Unknown app', !client.hostName);
+  const folder = client.workdir || client.project;
+  set('workdir', folder
+    ? folder + (client.branch ? ` (git branch ${client.branch})` : '')
+    : 'Unknown', !folder);
   const from = describeOrigin(client.remote, client.origin);
   set('from', client.legacy ? 'Unknown (older TurboWeb)' : from.label);
-  set('from-detail', from.detail);
+  set('from-detail', [from.detail, client.pid ? `pid ${client.pid}` : ''].filter(Boolean).join(' · '));
   const warn = doc.getElementById('warn');
   warn.textContent = client.legacy ? '' : from.warning;
   warn.classList.toggle('on', !!warn.textContent);
