@@ -556,7 +556,7 @@ func TestConnectionStatus_ListsEachBrowsersExtension(t *testing.T) {
 		var st struct {
 			Extensions []extensionInfo `json:"extensions"`
 		}
-		if err := json.Unmarshal(connectionStatusJSON(), &st); err != nil {
+		if err := json.Unmarshal(connectionStatusJSON(nil), &st); err != nil {
 			t.Fatal(err)
 		}
 		var names []string

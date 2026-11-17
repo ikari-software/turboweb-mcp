@@ -18,11 +18,15 @@ import (
 // command belongs to (the _client stamp) and where that session connected
 // from.
 
-// approveWaitMs is how long `introduce` waits for the human's answer. The
-// extension waits this long itself; the request gets slack on top so the
-// extension's own, more useful error arrives rather than a bare timeout.
+// approveWaitMs is how long `introduce` waits for the human's answer before
+// returning "pending". It stays well under the tool-call timeouts hosts
+// impose (some cut a call off at 60s), and nothing is lost when it runs out:
+// the window stays open, and whatever the user answers applies to the
+// agent's next command. The extension waits this long itself; the request
+// gets slack on top so the extension's own answer arrives rather than a
+// bare timeout.
 const (
-	approveWaitMs       = 120000
+	approveWaitMs       = 20000
 	approveReplySlackMs = 10000
 )
 
@@ -54,7 +58,7 @@ func (c *relayClientInfo) stamp() map[string]any {
 		"origin": c.origin,
 		"pid":    c.pid,
 	}
-	for _, k := range []string{"agentName", "model", "task", "hostName", "project"} {
+	for _, k := range []string{"agentName", "model", "task", "hostName", "project", "workdir", "branch"} {
 		if v := c.profile[k]; v != "" {
 			out[k] = v
 		}
@@ -73,7 +77,7 @@ func localClientStamp() map[string]any {
 		"origin": "",
 		"pid":    os.Getpid(),
 	}
-	for _, k := range []string{"agentName", "model", "task", "hostName", "project"} {
+	for _, k := range []string{"agentName", "model", "task", "hostName", "project", "workdir", "branch"} {
 		if v, _ := s[k].(string); v != "" {
 			out[k] = v
 		}
@@ -115,6 +119,7 @@ func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout 
 		browser     string
 		err         error
 		unsupported bool
+		pending     bool
 	}
 	answers := make(chan answer, len(open))
 	for _, bc := range open {
@@ -124,15 +129,23 @@ func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout 
 			p[k] = v
 		}
 		go func(bc *BrowserConnection) {
-			_, err := sendTo(bc, "approve_agent", p, timeout)
+			raw, err := sendTo(bc, "approve_agent", p, timeout)
 			unsupported := err != nil && strings.Contains(err.Error(), "Unknown action")
-			answers <- answer{bc.tabPrefix(), err, unsupported}
+			// An extension that ran out of waiting answers {pending:true}: the
+			// window is still open, and that is not a yes.
+			var r struct {
+				Pending bool `json:"pending"`
+			}
+			pending := err == nil && json.Unmarshal(raw, &r) == nil && r.Pending
+			answers <- answer{bc.tabPrefix(), err, unsupported, pending}
 		}(bc)
 	}
-	var failures, unsupported []string
+	var failures, unsupported, pending []string
 	for range open {
 		a := <-answers
 		switch {
+		case a.pending:
+			pending = append(pending, a.browser)
 		case a.err == nil:
 			return json.Marshal(map[string]any{"approved": true, "browser": a.browser})
 		case a.unsupported:
@@ -145,6 +158,12 @@ func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout 
 		b, _ := json.Marshal(map[string]any{"approved": false, "unsupported": unsupported})
 		return b, nil
 	}
+	// Still undecided somewhere beats a refusal elsewhere: the user may yet
+	// say yes in that browser.
+	if len(pending) > 0 {
+		b, _ := json.Marshal(map[string]any{"approved": false, "pending": pending})
+		return b, nil
+	}
 	return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
 }
 
@@ -152,7 +171,10 @@ func sendApproveAgent(open []*BrowserConnection, params map[string]any, timeout 
 // the answer. With no browser to ask it returns a note instead of an error:
 // the browser will ask when the first command reaches it.
 func requestApproval() (note string, err error) {
-	raw, err := send("approve_agent", map[string]any{"timeoutMs": approveWaitMs}, approveWaitMs+approveReplySlackMs)
+	// acceptsPending tells the extension it may answer {pending:true} when the
+	// user hasn't decided yet; it errors instead for daemons that predate it,
+	// which would read any result as approval.
+	raw, err := send("approve_agent", map[string]any{"timeoutMs": approveWaitMs, "acceptsPending": true}, approveWaitMs+approveReplySlackMs)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "No browser extension connected") || strings.Contains(msg, "Not connected to daemon") {
@@ -163,6 +185,7 @@ func requestApproval() (note string, err error) {
 	var reply struct {
 		Browser     string   `json:"browser"`
 		Unsupported []string `json:"unsupported"`
+		Pending     []string `json:"pending"`
 	}
 	if err := json.Unmarshal(raw, &reply); err != nil {
 		return "", fmt.Errorf("could not read the browser's answer: %w", err)
@@ -172,8 +195,23 @@ func requestApproval() (note string, err error) {
 			" is too old to ask its user, so nobody has approved you — it cannot enforce approval either. " +
 			"Your commands will run, but the human gets no say until the extension is updated.", nil
 	}
+	if len(reply.Pending) > 0 {
+		return approvalPendingNote(reply.Pending), nil
+	}
 	if reply.Browser == "" {
 		return "", fmt.Errorf("the browser answered without saying which one it was")
 	}
 	return "The user approved you in " + reply.Browser + ".", nil
+}
+
+// approvalPendingNote is what introduce says when the user has not answered
+// yet. It is a result, not an error: the agent did nothing wrong, and there
+// is no need for it to sit in a blocked call while a person gets to the
+// window.
+func approvalPendingNote(browsers []string) string {
+	return "Approval requested: a window is open in " + strings.Join(browsers, ", ") +
+		" asking the user to let you in, and it stays open until they answer. You don't need to wait for it: " +
+		"tell the user the window is there, carry on with work that doesn't need the browser, and check " +
+		"connection_status (approval[].state) or simply retry your browser call later. Until they answer, each " +
+		"browser call waits up to 15 seconds and then says it is still waiting."
 }

@@ -39,7 +39,10 @@ describe('renderApproval', () => {
     renderApproval(doc, { name: 'Claude', model: 'some-model', hostName: 'Claude Code', project: 'ffsync', pid: 42,
       task: 'Sorting tabs by topic', remote: '127.0.0.1:54321', origin: '' });
     expect(doc.getElementById('name').textContent).toBe('Claude');
-    expect(doc.getElementById('about').textContent).toBe('some-model · Claude Code · in ffsync · pid 42');
+    expect(doc.getElementById('model').textContent).toBe('some-model');
+    expect(doc.getElementById('app').textContent).toBe('Claude Code');
+    expect(doc.getElementById('workdir').textContent).toBe('ffsync');
+    expect(doc.getElementById('from-detail').textContent).toBe('127.0.0.1:54321 · pid 42');
     expect(doc.getElementById('task').textContent).toBe('Sorting tabs by topic');
     expect(doc.getElementById('from').textContent).toBe('This computer');
     expect(doc.getElementById('warn').classList.contains('on')).toBe(false);
@@ -51,6 +54,16 @@ describe('renderApproval', () => {
     expect(doc.querySelector('dl img, dl b')).toBeNull();
     expect(doc.getElementById('name').textContent).toBe('<img src=x onerror=alert(1)>');
     expect(doc.getElementById('warn').classList.contains('on')).toBe(true);
+  });
+
+  it('keeps what TurboWeb saw apart from what the agent claims', () => {
+    const doc = page();
+    renderApproval(doc, { name: 'Claude', hostName: 'Claude Code', project: 'ffsync',
+      workdir: '~/src/ai/ffsync', branch: 'main', remote: '127.0.0.1:1' });
+    expect(doc.getElementById('workdir').textContent).toBe('~/src/ai/ffsync (git branch main)');
+    // A model the agent did not state is shown as unknown, not left blank.
+    expect(doc.getElementById('model').textContent).toBe('Not stated');
+    expect(doc.getElementById('model').classList.contains('unknown')).toBe(true);
   });
 
   it('says so when the agent gave no purpose or comes through an older TurboWeb', () => {

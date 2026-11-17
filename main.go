@@ -81,9 +81,11 @@ the extension popup). Without it the overlay goes silent.
 bypasses the overlay entirely. For reads, prefer `+"`extract_text` / `find_text`"+`
 / `+"`inspect` / `get_interactive_map`"+` — they animate; raw JS reads don't.
 
-⚠️ Call `+"`introduce`"+` FIRST, once per session, with your name (and model /
-host / task if known). Every other tool refuses to run until you do, so the
-human sees who is driving instead of a guessed editor name.
+⚠️ Call `+"`introduce`"+` FIRST, once per session: your plain name, your exact
+model ID only if you are told it (never a guess), and as `+"`task`"+` the whole job
+the user gave you, not your next step. The human's approval can last days.
+Every other tool refuses to run until you do. If they haven't answered the
+approval window yet, introduce says so: carry on and check back later.
 
 ⚠️ Every tab-scoped tool needs a `+"`tabId`"+`: take one from `+"`list_tabs`"+`, or call
 `+"`open_tab`"+` for a tab of your own. There is no implicit "active tab".

@@ -774,7 +774,11 @@ func handleExtensions(w http.ResponseWriter, _ *http.Request) {
 // the process that actually owns the browser WebSockets — the daemon — so
 // connection_status routes here through send() rather than reading a relay
 // client's (always-empty) browsers map.
-func connectionStatusJSON() json.RawMessage {
+//
+// caller is the _client stamp of the agent asking. A relay client's stamp is
+// attached by the relay handler; without one (in-process mode) it is this
+// process's own session.
+func connectionStatusJSON(caller map[string]any) json.RawMessage {
 	open := getOpenBrowsers()
 	names := make([]string, len(open))
 	for i, b := range open {
@@ -805,7 +809,13 @@ func connectionStatusJSON() json.RawMessage {
 	// being turned away. Best-effort: an old extension answers nothing, and a
 	// diagnostic must never fail because a browser did not respond.
 	if len(open) > 0 {
-		status["approval"] = approvalSummary(open, localClientStamp())
+		// Ask about the agent that called, not this process: in daemon mode
+		// localClientStamp is the daemon's own session, which nobody ever
+		// approves, so every relay agent would read "needed" forever.
+		if caller == nil {
+			caller = localClientStamp()
+		}
+		status["approval"] = approvalSummary(open, caller)
 		if approvalSkipped() {
 			status["approvalSkipped"] = true
 		}
@@ -929,7 +939,8 @@ func sendDirect(action string, params map[string]any, timeout int) (json.RawMess
 	// "no browser connected" error path) so a relay client's connection_status
 	// reaches the daemon, where the browser WebSockets actually live.
 	if action == "connection_status" {
-		return connectionStatusJSON(), nil
+		caller, _ := params["_client"].(map[string]any)
+		return connectionStatusJSON(caller), nil
 	}
 
 	// Clone params before mutating: a caller may pass one map across several

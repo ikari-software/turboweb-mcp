@@ -87,21 +87,27 @@ func registerSessionTools(s *server.MCPServer) {
 				"REQUIRED FIRST CALL. Introduce yourself to the human watching the browser. "+
 					"All other tools (except connection_status / check_for_updates / self_update) "+
 					"refuse to run until you call this once. The extension popup and on-page "+
-					"cursor then show who you are instead of a guessed editor name. Call again "+
-					"only if your task changes. The first call opens a prompt in the browser where the human "+
-					"approves you (they see your name, your task and where you connect from) and waits up to "+
-					"two minutes for their answer, so give an honest, specific `task`."),
+					"cursor then show who you are. The first call opens a window in the browser where "+
+					"the human decides whether to let you in. It waits about 20 seconds for an answer and "+
+					"then returns either way; if they haven't answered yet, carry on and check later. "+
+					"Their answer lasts until your session ends or they restart the browser, which can be "+
+					"days, so `task` must describe the whole job, not your next step. TurboWeb itself adds "+
+					"the app you run in, your working folder and git branch, so don't repeat those. Call "+
+					"again only when the job itself changes."),
 			mcp.WithString("name", mcp.Required(), mcp.Description(
-				"Short name to show on the cursor and toasts, e.g. \"Claude\", \"Codex\", "+
-					"\"GPT-5\", or a persona name if you have one. Max 40 chars.")),
+				"Your name and nothing else, e.g. \"Claude\", \"Codex\", \"Gemini\", or a persona name the "+
+					"user gave you. Don't add the model or the app: they have their own fields. Max 40 chars.")),
 			mcp.WithString("model", mcp.Description(
-				"Your model identifier if you know it, e.g. \"claude-opus-4\", \"gpt-5\".")),
+				"Your exact model ID as your system prompt or host states it, e.g. \"claude-opus-4-5\", "+
+					"\"gpt-5-codex\". Leave it empty if nothing tells you: a guess from your name or "+
+					"model family misleads the person deciding whether to trust you.")),
 			mcp.WithString("host", mcp.Description(
-				"The app/harness running you, e.g. \"Claude Code\", \"Cursor\", \"jcode\", "+
-					"\"Codex CLI\", \"Claude Desktop\". Leave empty if unsure: it's auto-detected.")),
+				"Only if TurboWeb cannot tell: the app running you. It is normally read from the MCP "+
+					"handshake, and then this field is ignored.")),
 			mcp.WithString("task", mcp.Description(
-				"One short line on what you're doing for the user, e.g. \"Filling in the "+
-					"expense report\". Max 120 chars.")),
+				"The overall job the user gave you in this session, in a way they will recognise later, "+
+					"e.g. \"Fixing turboweb-mcp screenshot bugs and checking them in the browser\". Not "+
+					"your next step: that goes in each call's `intent`. Max 120 chars.")),
 		),
 		handleIntroduce,
 	)

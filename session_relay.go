@@ -10,7 +10,7 @@ import (
 // in its register message and the daemon forwards to the popup. Anything
 // else in the message is ignored.
 var relayProfileFields = []string{
-	"hostName", "agentName", "model", "task", "project",
+	"hostName", "agentName", "model", "task", "project", "workdir", "branch",
 	"clientName", "clientVersion",
 }
 
